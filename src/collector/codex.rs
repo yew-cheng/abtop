@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 use std::process::Command;
 
 /// Collector for OpenAI Codex CLI sessions.
@@ -44,10 +44,15 @@ impl CodexCollector {
         // Reset live rate limit each pass — only keep it if a current session provides one
         self.last_rate_limit = None;
 
-        // Step 1: Find running codex processes from shared ps data (no extra ps call)
-        let codex_pids = Self::find_codex_pids_from_shared(&shared.process_info);
+        // Step 1: Find running codex processes from shared ps data (no extra ps call).
+        // When MCP suppression is on, exclude `codex mcp-server` PIDs — those
+        // are surfaced through the MCP servers panel instead. See issue #95.
+        let codex_pids = Self::find_codex_pids_from_shared(
+            &shared.process_info,
+            &shared.mcp_server_pids,
+        );
         let just_pids: Vec<u32> = codex_pids.iter().map(|(p, _)| *p).collect();
-        let pid_to_jsonl = Self::map_pid_to_jsonl(&just_pids);
+        let pid_to_jsonl = Self::map_pid_to_jsonl(&just_pids, &self.sessions_dir);
         let pid_is_exec: HashMap<u32, bool> = codex_pids.into_iter().collect();
 
         let mut sessions = Vec::new();
@@ -93,6 +98,14 @@ impl CodexCollector {
                         continue;
                     }
                     if seen_jsonl.contains(&path) {
+                        continue;
+                    }
+                    // Skip rollouts still held open by an mcp-server PID:
+                    // the thread isn't actually finished, the mcp-server is
+                    // just holding the fd for resume. Without this skip, the
+                    // sessions panel grows a PID=0 "Done" row for every
+                    // historical thread on every active mcp-server.
+                    if shared.mcp_owned_rollouts.contains(&path) {
                         continue;
                     }
                     // Only show recently finished sessions (< 5 min old)
@@ -163,7 +176,7 @@ impl CodexCollector {
         let mem_mb = proc.map(|p| p.rss_kb / 1024).unwrap_or(0);
         let display_pid = pid.unwrap_or(0);
 
-        let project_name = result.cwd.rsplit('/').next().unwrap_or("?").to_string();
+        let project_name = process::last_path_segment(&result.cwd).unwrap_or("?").to_string();
 
         // Status detection
         // Note: Codex interactive sessions emit task_complete after every turn,
@@ -281,9 +294,17 @@ impl CodexCollector {
 
     /// Find PIDs of running codex processes from shared process data (no extra ps call).
     /// Returns (pid, is_exec) tuples — `is_exec` is true for one-shot `codex exec` runs.
-    fn find_codex_pids_from_shared(process_info: &HashMap<u32, ProcInfo>) -> Vec<(u32, bool)> {
+    /// PIDs in `mcp_server_pids` are skipped so `codex mcp-server` processes
+    /// are reported via the MCP servers panel instead.
+    fn find_codex_pids_from_shared(
+        process_info: &HashMap<u32, ProcInfo>,
+        mcp_server_pids: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, bool)> {
         let mut pids = Vec::new();
         for (pid, info) in process_info {
+            if mcp_server_pids.contains(pid) {
+                continue;
+            }
             let cmd = &info.command;
             let is_exec = cmd.contains(" exec");
             let is_codex = process::cmd_has_binary(cmd, "codex");
@@ -297,8 +318,15 @@ impl CodexCollector {
     /// Map codex PIDs to their open rollout-*.jsonl files.
     ///
     /// On Linux, scans /proc/{pid}/fd symlinks directly (no process spawn).
-    /// Falls back to lsof on other platforms.
-    fn map_pid_to_jsonl(pids: &[u32]) -> HashMap<u32, PathBuf> {
+    /// On Windows, scans ~/.codex/sessions/YYYY/MM/DD/ for recently modified
+    /// JSONL files and assigns them to discovered PIDs, since Windows has no
+    /// equivalent of lsof for enumerating open file descriptors.
+    /// Falls back to lsof on macOS/other platforms.
+    fn map_pid_to_jsonl(pids: &[u32], sessions_dir: &Path) -> HashMap<u32, PathBuf> {
+        // sessions_dir is consumed only by the windows arm below.
+        #[cfg(not(target_os = "windows"))]
+        let _ = sessions_dir;
+
         let mut map = HashMap::new();
         if pids.is_empty() {
             return map;
@@ -321,9 +349,47 @@ impl CodexCollector {
             map
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
         {
-            // Fallback: lsof on macOS and other platforms
+            // Windows has no lsof or /proc/{pid}/fd to map PIDs to open files.
+            // Instead, scan today's ~/.codex/sessions/YYYY/MM/DD/ directory for
+            // rollout-*.jsonl files, then assign them to discovered codex PIDs.
+            // Prefer recently modified files, but fall back to any today's file
+            // since Codex may be idle (waiting for input) and not actively writing.
+            let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+            if let Some(today_dir) = Self::today_session_dir(sessions_dir) {
+                if let Ok(entries) = fs::read_dir(&today_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
+                            continue;
+                        }
+                        if let Ok(meta) = fs::metadata(&path) {
+                            if let Ok(modified) = meta.modified() {
+                                candidates.push((path, modified));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort by modification time descending (most recent first)
+            candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Assign candidates to PIDs (most recent file → first PID)
+            for (i, &pid_u32) in pids.iter().enumerate() {
+                if i < candidates.len() {
+                    map.insert(pid_u32, candidates[i].0.clone());
+                }
+            }
+
+            map
+        }
+
+        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+        {
             let pid_args: Vec<String> = pids.iter().map(|p| format!("-p{}", p)).collect();
             let mut args = vec!["-F", "pn"];
             for pa in &pid_args {
@@ -440,7 +506,7 @@ fn parse_codex_tool_arg(arguments: &str) -> String {
 
     for key in ["file_path", "path"] {
         if let Some(raw) = value[key].as_str() {
-            let short = raw.rsplit('/').next().unwrap_or(raw);
+            let short = process::last_path_segment(raw).unwrap_or(raw);
             return sanitize_tool_arg(short);
         }
     }

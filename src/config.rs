@@ -1,10 +1,39 @@
 use std::path::PathBuf;
 
+#[derive(Clone, Copy)]
+pub struct PanelVisibility {
+    pub context: bool,
+    pub quota: bool,
+    pub tokens: bool,
+    pub projects: bool,
+    pub ports: bool,
+    pub sessions: bool,
+    pub mcp: bool,
+}
+
+impl Default for PanelVisibility {
+    fn default() -> Self {
+        Self {
+            context: true,
+            quota: true,
+            tokens: true,
+            projects: true,
+            ports: true,
+            sessions: true,
+            mcp: true,
+        }
+    }
+}
+
 pub struct AppConfig {
     pub theme: String,
     /// Agent CLI names to exclude from the TUI (e.g. ["codex"] to hide Codex).
     /// Matched case-insensitively against each collector's agent_cli identifier.
     pub hidden_agents: Vec<String>,
+    pub panels: PanelVisibility,
+    /// UI language override. Empty string means auto-detect from `LANG`.
+    /// Recognized values: "en", "zh" (anything starting with "zh" maps to Simplified Chinese).
+    pub language: String,
 }
 
 impl Default for AppConfig {
@@ -12,6 +41,8 @@ impl Default for AppConfig {
         Self {
             theme: "btop".to_string(),
             hidden_agents: Vec::new(),
+            panels: PanelVisibility::default(),
+            language: String::new(),
         }
     }
 }
@@ -51,12 +82,29 @@ pub fn load_config() -> AppConfig {
                 continue;
             }
             let val = val.trim_matches('"').trim_matches('\'');
-            if key == "theme" {
-                config.theme = val.to_string();
+            match key {
+                "theme" => config.theme = val.to_string(),
+                "language" => config.language = val.to_string(),
+                "show_context" => config.panels.context = parse_bool(val).unwrap_or(true),
+                "show_quota" => config.panels.quota = parse_bool(val).unwrap_or(true),
+                "show_tokens" => config.panels.tokens = parse_bool(val).unwrap_or(true),
+                "show_projects" => config.panels.projects = parse_bool(val).unwrap_or(true),
+                "show_ports" => config.panels.ports = parse_bool(val).unwrap_or(true),
+                "show_sessions" => config.panels.sessions = parse_bool(val).unwrap_or(true),
+                "show_mcp" => config.panels.mcp = parse_bool(val).unwrap_or(true),
+                _ => {}
             }
         }
     }
     config
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// Parse a simple one-line TOML string array like `["a", "b"]`.
@@ -74,42 +122,64 @@ fn parse_string_array(raw: &str) -> Vec<String> {
 }
 
 pub fn save_theme(name: &str) -> Result<(), String> {
+    write_with_updates(&[("theme", format!("\"{}\"", name))])
+}
+
+pub fn save_panel_visibility(panels: &PanelVisibility) -> Result<(), String> {
+    write_with_updates(&[
+        ("show_context", panels.context.to_string()),
+        ("show_quota", panels.quota.to_string()),
+        ("show_tokens", panels.tokens.to_string()),
+        ("show_projects", panels.projects.to_string()),
+        ("show_ports", panels.ports.to_string()),
+        ("show_sessions", panels.sessions.to_string()),
+        ("show_mcp", panels.mcp.to_string()),
+    ])
+}
+
+/// Read the config, replace or append each (key, value) pair, write it back.
+/// Lines that don't match any key are preserved verbatim so unknown keys and
+/// comments survive saves driven by unrelated parts of the UI.
+fn write_with_updates(updates: &[(&str, String)]) -> Result<(), String> {
     let path = config_path().ok_or("no config directory")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-
-    // Read existing config, update theme line (NotFound = fresh file, other errors = fail)
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.to_string()),
     };
-    let new_content = rewrite_theme_line(&content, name);
+    let new_content = rewrite_kv_lines(&content, updates);
     std::fs::write(&path, new_content).map_err(|e| e.to_string())
 }
 
-/// Rewrite (or append) the `theme = "..."` line in a config file body.
-/// Every other line is preserved verbatim, so keys like `hidden_agents`
-/// set by the user or by a future save_* helper survive theme switches.
-fn rewrite_theme_line(content: &str, name: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    let mut found = false;
+/// Rewrite (or append) the listed `key = value` lines in a config body.
+/// Every other line is preserved verbatim so keys set by the user or by a
+/// different save_* helper survive.
+fn rewrite_kv_lines(content: &str, updates: &[(&str, String)]) -> String {
+    let mut found = vec![false; updates.len()];
+    let mut out: Vec<String> = Vec::new();
     for line in content.lines() {
-        let is_theme_key = line.split_once('=')
-            .map(|(k, _)| k.trim() == "theme")
-            .unwrap_or(false);
-        if is_theme_key {
-            lines.push(format!("theme = \"{}\"", name));
-            found = true;
-        } else {
-            lines.push(line.to_string());
+        let line_key = line.split_once('=').map(|(k, _)| k.trim().to_string());
+        let mut replaced = false;
+        if let Some(key) = line_key {
+            if let Some(idx) = updates.iter().position(|(k, _)| *k == key) {
+                out.push(format!("{} = {}", updates[idx].0, updates[idx].1));
+                found[idx] = true;
+                replaced = true;
+            }
+        }
+        if !replaced {
+            out.push(line.to_string());
         }
     }
-    if !found {
-        lines.push(format!("theme = \"{}\"", name));
+    for (idx, (k, v)) in updates.iter().enumerate() {
+        if !found[idx] {
+            out.push(format!("{} = {}", k, v));
+        }
     }
-    lines.join("\n") + "\n"
+    out.join("\n") + "\n"
 }
 
 #[cfg(test)]
@@ -137,24 +207,30 @@ mod tests {
     fn parse_string_array_empty_and_malformed() {
         assert!(parse_string_array("[]").is_empty());
         assert!(parse_string_array("not an array").is_empty());
-        assert!(parse_string_array(r#"["a",,]"#).iter().all(|s| !s.is_empty()) );
+        assert!(parse_string_array(r#"["a",,]"#)
+            .iter()
+            .all(|s| !s.is_empty()));
+    }
+
+    fn theme_update(name: &str) -> Vec<(&'static str, String)> {
+        vec![("theme", format!("\"{}\"", name))]
     }
 
     #[test]
     fn rewrite_theme_preserves_hidden_agents_line() {
         let before = "theme = \"btop\"\nhidden_agents = [\"codex\"]\n";
-        let after = rewrite_theme_line(before, "dracula");
+        let after = rewrite_kv_lines(before, &theme_update("dracula"));
         assert!(after.contains("theme = \"dracula\""));
         assert!(
             after.contains("hidden_agents = [\"codex\"]"),
-            "hidden_agents line dropped by rewrite_theme_line:\n{after}"
+            "hidden_agents line dropped:\n{after}"
         );
     }
 
     #[test]
     fn rewrite_theme_preserves_arbitrary_unknown_keys() {
         let before = "# user comment\nfuture_key = 42\ntheme = \"btop\"\n";
-        let after = rewrite_theme_line(before, "nord");
+        let after = rewrite_kv_lines(before, &theme_update("nord"));
         assert!(after.contains("# user comment"));
         assert!(after.contains("future_key = 42"));
         assert!(after.contains("theme = \"nord\""));
@@ -163,8 +239,39 @@ mod tests {
     #[test]
     fn rewrite_theme_appends_when_missing() {
         let before = "hidden_agents = [\"codex\"]\n";
-        let after = rewrite_theme_line(before, "gruvbox");
+        let after = rewrite_kv_lines(before, &theme_update("gruvbox"));
         assert!(after.contains("hidden_agents = [\"codex\"]"));
         assert!(after.contains("theme = \"gruvbox\""));
+    }
+
+    #[test]
+    fn rewrite_panels_replaces_existing_and_appends_missing() {
+        let before = "theme = \"btop\"\nshow_quota = true\n";
+        let updates: Vec<(&str, String)> = vec![
+            ("show_quota", "false".to_string()),
+            ("show_projects", "false".to_string()),
+        ];
+        let after = rewrite_kv_lines(before, &updates);
+        assert!(after.contains("show_quota = false"));
+        assert!(!after.contains("show_quota = true"));
+        assert!(after.contains("show_projects = false"));
+        assert!(after.contains("theme = \"btop\""));
+    }
+
+    #[test]
+    fn parse_bool_round_trips_visibility_keys() {
+        assert_eq!(parse_bool("true"), Some(true));
+        assert_eq!(parse_bool("False"), Some(false));
+        assert_eq!(parse_bool("nope"), None);
+    }
+
+    #[test]
+    fn rewrite_language_replaces_existing() {
+        let before = "theme = \"btop\"\nlanguage = \"en\"\n";
+        let updates: Vec<(&str, String)> = vec![("language", "\"zh\"".to_string())];
+        let after = rewrite_kv_lines(before, &updates);
+        assert!(after.contains("language = \"zh\""));
+        assert!(!after.contains("language = \"en\""));
+        assert!(after.contains("theme = \"btop\""));
     }
 }

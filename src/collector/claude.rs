@@ -1,5 +1,8 @@
 use super::process::{self, ProcInfo};
-use crate::model::{AgentSession, ChildProcess, FileAccess, FileOp, SessionFile, SessionStatus, SubAgent, MAX_FILE_ACCESSES};
+use crate::model::{
+    AgentSession, ChildProcess, FileAccess, FileOp, SessionFile, SessionStatus, SubAgent,
+    MAX_FILE_ACCESSES,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -7,7 +10,11 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_vendor = "apple"),
+    not(target_os = "windows")
+))]
 use std::process::Command;
 
 /// A single Claude config directory (sessions + projects + transcripts).
@@ -244,7 +251,16 @@ impl ClaudeCollector {
             map_pid_to_libproc_open_paths(pids)
         }
 
-        #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+        #[cfg(target_os = "windows")]
+        {
+            map_pid_to_sysinfo_open_paths(pids)
+        }
+
+        #[cfg(all(
+            not(target_os = "linux"),
+            not(target_vendor = "apple"),
+            not(target_os = "windows")
+        ))]
         {
             map_pid_to_lsof_open_paths(pids)
         }
@@ -307,7 +323,9 @@ impl ClaudeCollector {
             return None;
         }
 
-        let project_name = sf.cwd.rsplit('/').next().unwrap_or("?").to_string();
+        let project_name = process::last_path_segment(&sf.cwd)
+            .unwrap_or("?")
+            .to_string();
 
         let proc = process_info.get(&sf.pid);
         let mem_mb = proc.map(|p| p.rss_kb / 1024).unwrap_or(0);
@@ -375,7 +393,8 @@ impl ClaudeCollector {
                     prev.token_history.extend(delta.token_history);
                     if prev.tool_calls.len() < 500 {
                         let remaining = 500 - prev.tool_calls.len();
-                        prev.tool_calls.extend(delta.tool_calls.into_iter().take(remaining));
+                        prev.tool_calls
+                            .extend(delta.tool_calls.into_iter().take(remaining));
                     }
                     // Only overwrite turn-state when the delta actually
                     // observed new user/assistant lines. A no-op tick (file
@@ -481,9 +500,12 @@ impl ClaudeCollector {
         let status = {
             let has_active_descendant =
                 process::has_active_descendant(sf.pid, children_map, process_info, 5.0);
-            let tools_pending = cached.last_assistant_ts_ms > 0;
+            // Non-empty current_task = latest assistant turn left a tool_use
+            // unanswered. Catches fast tools (`Bash rm ...`) that finish
+            // between CPU samples, so has_active_descendant alone misses them.
+            let pending_tool = !cached.current_task.is_empty();
             let model_generating = cached.last_user_ts_ms > 0;
-            if has_active_descendant || tools_pending {
+            if has_active_descendant || pending_tool {
                 SessionStatus::Executing
             } else if model_generating {
                 SessionStatus::Thinking
@@ -780,7 +802,44 @@ fn map_pid_to_libproc_open_paths(pids: &[u32]) -> HashMap<u32, ProcessOpenPaths>
     map
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+#[cfg(target_os = "windows")]
+fn map_pid_to_sysinfo_open_paths(pids: &[u32]) -> HashMap<u32, ProcessOpenPaths> {
+    use std::sync::{Mutex, OnceLock};
+
+    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+    let sys_mutex = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
+    let mut sys = sys_mutex.lock().expect("open-paths system mutex poisoned");
+
+    let pids_sys: Vec<sysinfo::Pid> = pids
+        .iter()
+        .copied()
+        .map(|p| sysinfo::Pid::from(p as usize))
+        .collect();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&pids_sys),
+        true,
+        sysinfo::ProcessRefreshKind::new().with_memory(),
+    );
+
+    // sysinfo 0.32 exposes cwd but not open file descriptors, so the `paths`
+    // fallback used by lsof/libproc on other platforms isn't available here.
+    // Claude session discovery still works via cwd plus the session-file index.
+    let mut map: HashMap<u32, ProcessOpenPaths> = HashMap::new();
+    for &pid_u32 in pids {
+        let pid = sysinfo::Pid::from(pid_u32 as usize);
+        if let Some(proc_) = sys.process(pid) {
+            let cwd = proc_.cwd().map(PathBuf::from);
+            map.insert(pid_u32, ProcessOpenPaths { cwd, paths: vec![] });
+        }
+    }
+    map
+}
+
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_vendor = "apple"),
+    not(target_os = "windows")
+))]
 fn map_pid_to_lsof_open_paths(pids: &[u32]) -> HashMap<u32, ProcessOpenPaths> {
     let pid_args: Vec<String> = pids.iter().map(|p| format!("-p{}", p)).collect();
     let mut args = vec!["-F", "ftn"];
@@ -794,7 +853,10 @@ fn map_pid_to_lsof_open_paths(pids: &[u32]) -> HashMap<u32, ProcessOpenPaths> {
         .unwrap_or_default()
 }
 
-#[cfg_attr(any(target_os = "linux", target_vendor = "apple"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "linux", target_vendor = "apple", target_os = "windows"),
+    allow(dead_code)
+)]
 fn parse_lsof_process_info(output: &str) -> HashMap<u32, ProcessOpenPaths> {
     let mut map: HashMap<u32, ProcessOpenPaths> = HashMap::new();
     let mut current_pid: Option<u32> = None;
@@ -1101,6 +1163,7 @@ fn is_symlink(path: &Path) -> bool {
 }
 
 /// Get file identity as (inode, mtime_nanos) for detecting file replacement.
+#[cfg(unix)]
 fn file_identity(path: &Path) -> (u64, u64) {
     fs::metadata(path)
         .ok()
@@ -1113,6 +1176,23 @@ fn file_identity(path: &Path) -> (u64, u64) {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
             (ino, mtime_ns)
+        })
+        .unwrap_or((0, 0))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path) -> (u64, u64) {
+    fs::metadata(path)
+        .ok()
+        .map(|m| {
+            let size = m.len();
+            let mtime_ns = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            (size, mtime_ns)
         })
         .unwrap_or((0, 0))
 }
@@ -1226,7 +1306,8 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                 bytes_read += n as u64;
                 {
                     // Parse timestamp from any entry (for tool duration calculation)
-                    let entry_ts_ms = val.get("timestamp")
+                    let entry_ts_ms = val
+                        .get("timestamp")
                         .and_then(|t| t.as_str())
                         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                         .map(|dt| dt.timestamp_millis().max(0) as u64)
@@ -1381,10 +1462,14 @@ fn parse_transcript(path: &Path, from_offset: u64) -> TranscriptResult {
                         Some("user") => {
                             // Compute tool call duration: time from assistant turn to this user turn
                             if entry_ts_ms > 0 && result.last_assistant_ts_ms > 0 {
-                                let duration = entry_ts_ms.saturating_sub(result.last_assistant_ts_ms);
+                                let duration =
+                                    entry_ts_ms.saturating_sub(result.last_assistant_ts_ms);
                                 // Distribute duration across tool calls from that assistant turn
                                 // (approximation: divide equally among pending zero-duration calls)
-                                let pending: Vec<usize> = result.tool_calls.iter().enumerate()
+                                let pending: Vec<usize> = result
+                                    .tool_calls
+                                    .iter()
+                                    .enumerate()
                                     .rev()
                                     .take_while(|(_, tc)| tc.duration_ms == 0)
                                     .map(|(i, _)| i)
@@ -1464,15 +1549,14 @@ fn is_tool_result_user_msg(message: Option<&Value>) -> bool {
     if arr.is_empty() {
         return false;
     }
-    arr.iter().all(|block| {
-        block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-    })
+    arr.iter()
+        .all(|block| block.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
 }
 
 fn encode_cwd_path(cwd: &str) -> String {
     cwd.chars()
         .map(|c| match c {
-            '/' | '_' | '.' => '-',
+            '/' | '\\' | ':' | '_' | '.' => '-',
             _ => c,
         })
         .collect()
@@ -1553,6 +1637,9 @@ fn extract_tool_arg(tool_use: &Value) -> String {
 }
 
 fn shorten_path(path: &str) -> String {
+    #[cfg(windows)]
+    let parts: Vec<&str> = path.rsplit(['/', '\\']).collect();
+    #[cfg(not(windows))]
     let parts: Vec<&str> = path.rsplit('/').collect();
     if parts.len() <= 2 {
         path.to_string()
@@ -1650,6 +1737,17 @@ fn read_env_var_from_proc(pid: u32, var_name: &str) -> Option<String> {
 }
 
 /// Stub for non-Linux platforms where /proc is not available.
+/// Windows has no equivalent way to read another process's environment block
+/// without elevated privileges, so per-process `CLAUDE_CONFIG_DIR` overrides
+/// can't be detected — abtop's own env (resolved in `refresh_config_dirs`)
+/// is the only signal there.
+///
+/// On macOS, `ps eww`/`KERN_PROCARGS2` are unreliable: the kernel truncates
+/// the env block to ~120 chars for non-root callers, so `CLAUDE_CONFIG_DIR`
+/// is rarely visible. Discovery of profile sessions instead piggybacks on
+/// `libproc` open-FD inspection (see `discover_active_session_paths`), which
+/// reads the actual session-file paths a Claude process has open and infers
+/// the config dir from there.
 #[cfg(not(target_os = "linux"))]
 fn read_env_var_from_proc(_pid: u32, _var_name: &str) -> Option<String> {
     None
@@ -1718,10 +1816,13 @@ mod tests {
         // must return saw_turn=false so the cached pending/thinking markers
         // aren't clobbered by the default-zero timestamps.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Edit","id":"t1","input":{"file_path":"x"}}]}}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Edit","id":"t1","input":{"file_path":"x"}}]}}"#,
+            ],
+        );
         let file_len = std::fs::metadata(file.path()).unwrap().len();
 
         let result = parse_transcript(file.path(), file_len);
@@ -1738,9 +1839,10 @@ mod tests {
         // `summary` lines emitted on compaction) must also leave saw_turn
         // false, so the merge step preserves the cached turn state.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            r#"{"type":"summary","summary":"compaction marker","leafUuid":"abc"}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[r#"{"type":"summary","summary":"compaction marker","leafUuid":"abc"}"#],
+        );
 
         let result = parse_transcript(file.path(), 0);
 
@@ -1761,11 +1863,14 @@ mod tests {
         //   3. assistant(next)     → last_user cleared (Wait)
         // Fix: skip tool_result wrappers when updating last_user_ts_ms.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"ls"}}]}}"#,
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a\nb"}]}}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"ls"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a\nb"}]}}"#,
+            ],
+        );
 
         let result = parse_transcript(file.path(), 0);
 
@@ -1785,10 +1890,13 @@ mod tests {
         // closes a thinking window, last_user_ts_ms must be zero and
         // last_assistant_ts_ms must carry the assistant timestamp.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Edit","id":"t1","input":{"file_path":"x"}}]}}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Edit","id":"t1","input":{"file_path":"x"}}]}}"#,
+            ],
+        );
 
         let result = parse_transcript(file.path(), 0);
 
@@ -1803,10 +1911,13 @@ mod tests {
         // last_user_ts_ms should carry its timestamp so the UI can render
         // the live Think row.
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write_lines(&mut file, &[
-            r#"{"type":"assistant","timestamp":"2026-03-28T15:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"ok"}]}}"#,
-            r#"{"type":"user","timestamp":"2026-03-28T15:00:10Z","message":{"role":"user","content":"next"}}"#,
-        ]);
+        write_lines(
+            &mut file,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-03-28T15:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"ok"}]}}"#,
+                r#"{"type":"user","timestamp":"2026-03-28T15:00:10Z","message":{"role":"user","content":"next"}}"#,
+            ],
+        );
 
         let result = parse_transcript(file.path(), 0);
 
@@ -2052,6 +2163,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_find_session_file_for_pid_rejects_symlinked_session_files() {
         let temp = tempfile::tempdir().unwrap();
@@ -2129,6 +2241,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_resolve_project_dir_rejects_symlinked_matches() {
         let temp = tempfile::tempdir().unwrap();
@@ -2167,6 +2280,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_open_paths_without_cwd_loads_session_from_same_config_root() {
         let temp = tempfile::tempdir().unwrap();
@@ -2329,7 +2443,10 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
 
         assert_eq!(result.file_accesses.len(), MAX_FILE_ACCESSES);
         // Oldest `extra` entries must have been dropped, newest must survive.
-        assert_eq!(result.file_accesses[0].path, format!("src/file_{}.rs", extra));
+        assert_eq!(
+            result.file_accesses[0].path,
+            format!("src/file_{}.rs", extra)
+        );
         assert_eq!(
             result.file_accesses[MAX_FILE_ACCESSES - 1].path,
             format!("src/file_{}.rs", total - 1),
@@ -2592,8 +2709,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         let t = if secs_from_now >= 0 {
             std::time::SystemTime::now() + std::time::Duration::from_secs(secs_from_now as u64)
         } else {
-            std::time::SystemTime::now()
-                - std::time::Duration::from_secs((-secs_from_now) as u64)
+            std::time::SystemTime::now() - std::time::Duration::from_secs((-secs_from_now) as u64)
         };
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         f.set_modified(t).unwrap();
@@ -2836,6 +2952,63 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
     }
 
     #[test]
+    fn test_load_session_pending_tool_use_is_executing() {
+        // Regression: when the last assistant turn ends with a tool_use that
+        // hasn't been answered yet, the agent is still mid-turn even if no
+        // descendant is burning CPU (fast tools like `Bash rm` finish before
+        // the next sample). Status must read as Executing, not Waiting.
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join(".claude");
+        let sessions_dir = profile.join("sessions");
+        let projects = profile.join("projects");
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let pid = 9103;
+        let sid = "pending-tool";
+        let session_path = sessions_dir.join(format!("{}.json", pid));
+        write_session_file(&session_path, pid, sid, &cwd);
+
+        // Trailing assistant tool_use with no following tool_result.
+        let transcript_dir = projects.join(encode_cwd_path(cwd.to_str().unwrap()));
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join(format!("{}.jsonl", sid));
+        std::fs::write(
+            &transcript,
+            r#"{"type":"user","timestamp":"2026-03-28T15:00:00Z","message":{"role":"user","content":"go"}}
+{"type":"assistant","timestamp":"2026-03-28T15:00:05Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"rm -v /tmp/x"}}]}}
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigDir::new(profile.clone());
+        // cpu_pct = 0 → has_active_descendant is false; Executing must come
+        // from the pending-tool branch alone.
+        let process_info = make_proc_info(pid, "claude");
+        let mut collector = ClaudeCollector::new();
+        collector.config_dirs = vec![config.clone()];
+
+        let session_paths = vec![(session_path, config)];
+        let ctx = build_discovery_context(&session_paths, &process_info);
+        let sessions = collector.load_session_paths(
+            &session_paths,
+            &process_info,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ctx,
+        );
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].status,
+            SessionStatus::Executing,
+            "pending tool_use must read as Executing even with idle descendants",
+        );
+    }
+
+    #[test]
     fn test_load_session_overrides_sid_after_clear() {
         // Reproduces issue #68: session file still points at the PID's initial
         // sessionId, but a newer transcript (from /clear) exists in the same
@@ -2967,8 +3140,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
         // adopt it.
         write_transcript(&projects, &cwd, sid_a, "a");
         write_transcript(&projects, &cwd, sid_b, "b");
-        let mystery =
-            write_transcript(&projects, &cwd, "newer-jsonl-someone-cleared", "mystery");
+        let mystery = write_transcript(&projects, &cwd, "newer-jsonl-someone-cleared", "mystery");
         set_mtime(&mystery, 0);
 
         let config = ConfigDir::new(profile.clone());

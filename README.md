@@ -3,7 +3,7 @@
 **Like [btop](https://github.com/aristocratos/btop), but for your AI coding agents.**
 
 See every Claude Code and Codex CLI session at a glance — token usage, context window %, rate limits, child processes, open ports, and more.
-Claude Code and Codex CLI sessions are discovered from local process/file state, so multiple active profiles are supported across macOS and Linux.
+Claude Code and Codex CLI sessions are discovered from local process/file state, so multiple active profiles are supported across macOS, Linux, and Windows.
 
 ![demo](https://raw.githubusercontent.com/graykode/abtop/main/assets/demo.gif)
 
@@ -30,6 +30,16 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/graykode/abtop/releases
 cargo install abtop
 ```
 
+### Windows
+
+Native support — no WSL required. Uses `sysinfo` for process info and `netstat -ano` for listening ports.
+
+```powershell
+powershell -c "irm https://github.com/graykode/abtop/releases/latest/download/abtop-installer.ps1 | iex"
+```
+
+Or `cargo install abtop` from any terminal with Git in PATH. Claude Code config is resolved automatically from `%USERPROFILE%\.claude`.
+
 ### Other
 
 Pre-built binaries for all platforms are available on the [GitHub Releases](https://github.com/graykode/abtop/releases) page.
@@ -44,17 +54,6 @@ abtop --theme dracula    # Launch with a specific theme
 ```
 
 Recommended terminal size: **120x40** or larger. Minimum 80x24 — panels hide gracefully when small.
-
-### Windows
-
-abtop requires Unix tools (`ps`, `lsof`) and is not supported natively on Windows. Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) instead:
-
-```bash
-wsl --install
-# Inside WSL:
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh
-abtop
-```
 
 ### tmux
 
@@ -120,7 +119,18 @@ theme = "btop"
 # Hide specific agent CLIs from the TUI (case-insensitive).
 # Useful if you only use one agent and want a cleaner view.
 hidden_agents = ["codex"]
+# UI language. Omit or leave empty to auto-detect from LANG.
+language = "zh"
 ```
+
+### Supported Languages
+
+| Code | Language            |
+| ---- | ------------------- |
+| `en` | English (default)   |
+| `zh` | Simplified Chinese  |
+
+When `language` is unset, abtop auto-detects from `LANG` — any value starting with `zh` switches to Simplified Chinese, otherwise English.
 
 ## Key Bindings
 

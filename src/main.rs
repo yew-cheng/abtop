@@ -3,6 +3,7 @@ mod collector;
 mod config;
 mod demo;
 mod host_info;
+mod locale;
 mod model;
 mod setup;
 mod theme;
@@ -10,7 +11,9 @@ mod ui;
 
 use app::{App, JumpOutcome};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use std::io::{self, stdout};
@@ -66,18 +69,17 @@ fn main() -> io::Result<()> {
                 std::process::exit(1);
             })
         })
-        .or_else(|| {
-            theme::Theme::by_name(&cfg.theme)
-        });
+        .or_else(|| theme::Theme::by_name(&cfg.theme));
 
     let demo_mode = std::env::args().any(|a| a == "--demo");
     let exit_on_jump = std::env::args().any(|a| a == "--exit-on-jump");
 
     // --once flag: print snapshot and exit
     if std::env::args().any(|a| a == "--once") {
-        let mut app = App::new_with_hidden(
+        let mut app = App::new_with_config(
             initial_theme.unwrap_or_default(),
             &cfg.hidden_agents,
+            cfg.panels,
         );
         if demo_mode {
             demo::populate_demo(&mut app);
@@ -102,7 +104,14 @@ fn main() -> io::Result<()> {
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let app_result = run_app(&mut terminal, demo_mode, initial_theme, exit_on_jump, &cfg.hidden_agents);
+    let app_result = run_app(
+        &mut terminal,
+        demo_mode,
+        initial_theme,
+        exit_on_jump,
+        &cfg.hidden_agents,
+        cfg.panels,
+    );
 
     // Always attempt both cleanup steps regardless of app result
     let r1 = disable_raw_mode();
@@ -112,8 +121,15 @@ fn main() -> io::Result<()> {
     app_result.and(r1).and(r2)
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, demo_mode: bool, initial_theme: Option<theme::Theme>, exit_on_jump: bool, hidden_agents: &[String]) -> io::Result<()> {
-    let mut app = App::new_with_hidden(initial_theme.unwrap_or_default(), hidden_agents);
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    demo_mode: bool,
+    initial_theme: Option<theme::Theme>,
+    exit_on_jump: bool,
+    hidden_agents: &[String],
+    panels: config::PanelVisibility,
+) -> io::Result<()> {
+    let mut app = App::new_with_config(initial_theme.unwrap_or_default(), hidden_agents, panels);
     if demo_mode {
         demo::populate_demo(&mut app);
     } else {
@@ -140,13 +156,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, demo_mode: boo
                             KeyCode::Char('T') => app.tree_view = !app.tree_view,
                             KeyCode::Char('l') => app.toggle_timeline(),
                             KeyCode::Char('f') => app.toggle_file_audit(),
-                            KeyCode::Char(c @ '1'..='5') => app.toggle_panel(c as u8 - b'0'),
+                            KeyCode::Char(c @ '1'..='7') => app.toggle_panel(c as u8 - b'0'),
+                            KeyCode::Char('M') => app.toggle_mcp_session_suppression(),
                             KeyCode::Char('t') => app.cycle_theme(),
                             _ => {}
                         }
                     } else if app.config_open {
                         match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => app.toggle_config(),
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                                app.toggle_config()
+                            }
                             KeyCode::Down | KeyCode::Char('j') => app.config_select_next(),
                             KeyCode::Up | KeyCode::Char('k') => app.config_select_prev(),
                             KeyCode::Enter | KeyCode::Char(' ') => app.config_toggle_selected(),
@@ -173,19 +192,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, demo_mode: boo
                             KeyCode::Char('t') => app.cycle_theme(),
                             KeyCode::Char('T') => app.tree_view = !app.tree_view,
                             KeyCode::Char('l') | KeyCode::Char('L') => app.toggle_timeline(),
-                            KeyCode::Char(c @ '1'..='5') => app.toggle_panel(c as u8 - b'0'),
+                            KeyCode::Char(c @ '1'..='7') => app.toggle_panel(c as u8 - b'0'),
+                            KeyCode::Char('M') => app.toggle_mcp_session_suppression(),
                             KeyCode::Char('c') => app.toggle_config(),
                             KeyCode::Char('v') => app.toggle_view_menu(),
                             KeyCode::Char('?') => app.toggle_help(),
                             KeyCode::Char('/') => app.filter_active = true,
                             KeyCode::Esc if !app.filter_text.is_empty() => app.clear_filter(),
                             KeyCode::Char('f') | KeyCode::Char('F') => app.toggle_file_audit(),
-                            KeyCode::Enter if !demo_mode => {
-                                match app.jump_to_session() {
-                                    JumpOutcome::Jumped if exit_on_jump => app.quit(),
-                                    JumpOutcome::Failed(msg) => app.set_status(msg),
-                                    JumpOutcome::Jumped | JumpOutcome::NoOp => {}
-                                }
+                            KeyCode::Enter if !demo_mode => match app.jump_to_session() {
+                                JumpOutcome::Jumped if exit_on_jump => app.quit(),
+                                JumpOutcome::Failed(msg) => app.set_status(msg),
+                                JumpOutcome::Jumped | JumpOutcome::NoOp => {}
                             },
                             _ => {}
                         }
@@ -221,17 +239,49 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, demo_mode: boo
 /// (Trojan Source) style attacks via RTLO/LRO/PDF/isolate characters.
 fn sanitize_output(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control()
-            && !matches!(*c,
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c,
                 '\u{202A}'..='\u{202E}'
                 | '\u{2066}'..='\u{2069}'
                 | '\u{200E}'
-                | '\u{200F}'))
+                | '\u{200F}')
+        })
         .collect()
 }
 
 fn print_snapshot(app: &App) {
-    println!("abtop — {} sessions\n", app.sessions.len());
+    println!(
+        "abtop — {} sessions, {} mcp servers\n",
+        app.sessions.len(),
+        app.mcp_servers.len()
+    );
+    if !app.mcp_servers.is_empty() {
+        let now = std::time::SystemTime::now();
+        for server in &app.mcp_servers {
+            let active = server.active_count(now, collector::mcp::ACTIVE_MTIME_SECS);
+            let total = server.rollouts.len();
+            let last_age = server
+                .latest_mtime()
+                .and_then(|m| now.duration_since(m).ok())
+                .map(|d| {
+                    if d.as_secs() < 60 {
+                        format!("{}s", d.as_secs())
+                    } else if d.as_secs() < 3600 {
+                        format!("{}m", d.as_secs() / 60)
+                    } else {
+                        format!("{}h", d.as_secs() / 3600)
+                    }
+                })
+                .unwrap_or_else(|| "—".to_string());
+            let profile = server.profile.as_deref().unwrap_or("default");
+            println!(
+                "  mcp pid={} parent={} profile={:<16} active={}/{} last={}",
+                server.pid, server.parent_cli, profile, active, total, last_age
+            );
+        }
+        println!();
+    }
     for session in &app.sessions {
         let status = match &session.status {
             model::SessionStatus::Thinking => "◉ Think",
@@ -267,7 +317,14 @@ fn print_snapshot(app: &App) {
             println!(
                 "       {} {} {}K {}",
                 child.pid,
-                sanitize_output(&child.command.split_whitespace().take(3).collect::<Vec<_>>().join(" ")),
+                sanitize_output(
+                    &child
+                        .command
+                        .split_whitespace()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
                 child.mem_kb / 1024,
                 port,
             );
@@ -289,7 +346,8 @@ fn run_update() -> io::Result<()> {
 
     let dl_status = std::process::Command::new("curl")
         .args([
-            "--proto", "=https",
+            "--proto",
+            "=https",
             "--tlsv1.2",
             "-LsSf",
             "https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh",

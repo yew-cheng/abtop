@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -11,6 +12,10 @@ use super::{btop_block, grad_at, make_gradient, truncate_str};
 pub(crate) fn draw_projects_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let mut lines = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let no_git = t("projects.no_git");
+    let clean = t("projects.clean");
+    let no_projects = t("projects.no_projects");
+
     for session in &app.sessions {
         if !seen.insert(&session.project_name) {
             continue;
@@ -22,12 +27,20 @@ pub(crate) fn draw_projects_panel(f: &mut Frame, app: &App, area: Rect, theme: &
                 .add_modifier(Modifier::BOLD),
         )]));
         let branch = if session.git_branch.is_empty() {
-            "no git".to_string()
+            no_git.clone()
         } else {
             session.git_branch.clone()
         };
-        let used_grad = make_gradient(theme.used_grad.start, theme.used_grad.mid, theme.used_grad.end);
-        let branch_color = if session.git_branch.is_empty() { theme.inactive_fg } else { theme.main_fg };
+        let used_grad = make_gradient(
+            theme.used_grad.start,
+            theme.used_grad.mid,
+            theme.used_grad.end,
+        );
+        let branch_color = if session.git_branch.is_empty() {
+            theme.inactive_fg
+        } else {
+            theme.main_fg
+        };
         let mut branch_spans = vec![
             Span::styled("   ", Style::default()),
             Span::styled(branch, Style::default().fg(branch_color)),
@@ -50,17 +63,20 @@ pub(crate) fn draw_projects_panel(f: &mut Frame, app: &App, area: Rect, theme: &
                 ));
             }
         } else {
-            branch_spans.push(Span::styled(" ✓clean", Style::default().fg(theme.proc_misc)));
+            branch_spans.push(Span::styled(
+                format!(" {}", clean),
+                Style::default().fg(theme.proc_misc),
+            ));
         }
         lines.push(Line::from(branch_spans));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            " no projects",
+            format!(" {}", no_projects),
             Style::default().fg(theme.inactive_fg),
         )));
     }
 
-    let block = btop_block("projects", "", theme.mem_box, theme);
+    let block = btop_block("projects", "⁴", theme.mem_box, theme);
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

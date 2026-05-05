@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::locale::t;
 use crate::theme::Theme;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -25,15 +26,66 @@ pub(crate) fn items(app: &App) -> Vec<ViewItem> {
     use ViewState::*;
     let bool_state = |b: bool| if b { On } else { Off };
     vec![
-        ViewItem { key: 'T', label: "tree view",       state: bool_state(app.tree_view) },
-        ViewItem { key: 'l', label: "timeline",        state: bool_state(app.show_timeline) },
-        ViewItem { key: 'f', label: "file audit",      state: bool_state(app.show_file_audit) },
-        ViewItem { key: '1', label: "context panel",   state: bool_state(app.show_context) },
-        ViewItem { key: '2', label: "quota panel",     state: bool_state(app.show_quota) },
-        ViewItem { key: '3', label: "tokens panel",    state: bool_state(app.show_tokens) },
-        ViewItem { key: '4', label: "ports panel",     state: bool_state(app.show_ports) },
-        ViewItem { key: '5', label: "sessions panel",  state: bool_state(app.show_sessions) },
-        ViewItem { key: 't', label: "cycle theme",     state: Action },
+        ViewItem {
+            key: 'T',
+            label: t("view.tree_view").leak(),
+            state: bool_state(app.tree_view),
+        },
+        ViewItem {
+            key: 'l',
+            label: t("view.timeline").leak(),
+            state: bool_state(app.show_timeline),
+        },
+        ViewItem {
+            key: 'f',
+            label: t("view.file_audit").leak(),
+            state: bool_state(app.show_file_audit),
+        },
+        ViewItem {
+            key: '1',
+            label: t("view.context_panel").leak(),
+            state: bool_state(app.show_context),
+        },
+        ViewItem {
+            key: '2',
+            label: t("view.quota_panel").leak(),
+            state: bool_state(app.show_quota),
+        },
+        ViewItem {
+            key: '3',
+            label: t("view.tokens_panel").leak(),
+            state: bool_state(app.show_tokens),
+        },
+        ViewItem {
+            key: '4',
+            label: t("view.projects_panel").leak(),
+            state: bool_state(app.show_projects),
+        },
+        ViewItem {
+            key: '5',
+            label: t("view.ports_panel").leak(),
+            state: bool_state(app.show_ports),
+        },
+        ViewItem {
+            key: '6',
+            label: t("view.sessions_panel").leak(),
+            state: bool_state(app.show_sessions),
+        },
+        ViewItem {
+            key: '7',
+            label: t("view.mcp_servers_panel").leak(),
+            state: bool_state(app.show_mcp),
+        },
+        ViewItem {
+            key: 'M',
+            label: t("view.mcp_session_hide").leak(),
+            state: bool_state(app.mcp_suppress_sessions),
+        },
+        ViewItem {
+            key: 't',
+            label: t("view.cycle_theme").leak(),
+            state: Action,
+        },
     ]
 }
 
@@ -48,12 +100,15 @@ pub(crate) fn draw_view_overlay(f: &mut Frame, app: &App, theme: &Theme) {
 
     f.render_widget(Clear, popup);
 
+    let view_title = t("view.title");
     let block = Block::default()
         .style(Style::default().bg(theme.main_bg))
         .title(
             Line::from(vec![Span::styled(
-                " View ",
-                Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+                view_title.clone(),
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
             )])
             .alignment(Alignment::Center),
         )
@@ -69,27 +124,35 @@ pub(crate) fn draw_view_overlay(f: &mut Frame, app: &App, theme: &Theme) {
         popup.height.saturating_sub(2),
     );
 
+    let on_str = t("view.on");
+    let off_str = t("view.off");
+    let action_str = t("view.action");
+
     let mut lines: Vec<Line> = Vec::with_capacity(entries.len() + 2);
     for item in &entries {
-        let state_str = match item.state {
-            ViewState::On => "on",
-            ViewState::Off => "off",
-            ViewState::Action => "→",
-        };
-        let state_style = match item.state {
-            ViewState::On => Style::default().fg(theme.proc_misc),
-            ViewState::Off => Style::default().fg(theme.inactive_fg),
-            ViewState::Action => Style::default().fg(theme.session_id),
+        let (state_str, state_style) = match item.state {
+            ViewState::On => (on_str.clone(), Style::default().fg(theme.proc_misc)),
+            ViewState::Off => (off_str.clone(), Style::default().fg(theme.inactive_fg)),
+            ViewState::Action => (action_str.clone(), Style::default().fg(theme.session_id)),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("  {}  ", item.key), Style::default().fg(theme.hi_fg).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<22}", item.label), Style::default().fg(theme.main_fg)),
-            Span::styled(state_str.to_string(), state_style),
+            Span::styled(
+                format!("  {}  ", item.key),
+                Style::default()
+                    .fg(theme.hi_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<22}", item.label),
+                Style::default().fg(theme.main_fg),
+            ),
+            Span::styled(state_str, state_style),
         ]));
     }
     lines.push(Line::from(""));
+    let key_toggle = t("view.key_toggle");
     lines.push(Line::from(Span::styled(
-        " key = toggle  ·  Esc = close ",
+        key_toggle,
         Style::default().fg(theme.graph_text),
     )));
 

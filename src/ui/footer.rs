@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::locale::t;
 use crate::theme::Theme;
 use chrono::Timelike;
 use ratatui::layout::Rect;
@@ -16,8 +17,21 @@ pub(crate) fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             Span::styled(&app.filter_text, Style::default().fg(theme.title)),
             Span::styled("_", Style::default().fg(theme.hi_fg)),
             Span::styled(
-                format!("  {}/{} sessions  (Esc clear, Enter keep)",
-                    visible_count, app.sessions.len()),
+                format!(
+                    "  {}/{} {}  (Esc {}, Enter {})",
+                    visible_count,
+                    app.sessions.len(),
+                    t("footer.sessions"),
+                    t("footer.esc_clear")
+                        .split(',')
+                        .next()
+                        .unwrap_or(&t("footer.esc_clear")),
+                    t("footer.esc_clear")
+                        .split(',')
+                        .nth(1)
+                        .unwrap_or("keep")
+                        .trim()
+                ),
                 Style::default().fg(theme.inactive_fg),
             ),
         ];
@@ -29,24 +43,48 @@ pub(crate) fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let mut spans = vec![
         Span::styled(" ↑↓", Style::default().fg(theme.hi_fg)),
-        Span::styled(" select ", Style::default().fg(theme.main_fg)),
+        Span::styled(
+            format!(" {} ", t("footer.select")),
+            Style::default().fg(theme.main_fg),
+        ),
     ];
     if has_tmux {
         spans.push(Span::styled("↵", Style::default().fg(theme.hi_fg)));
-        spans.push(Span::styled(" jump ", Style::default().fg(theme.main_fg)));
+        spans.push(Span::styled(
+            format!(" {} ", t("footer.jump")),
+            Style::default().fg(theme.main_fg),
+        ));
     }
     spans.push(Span::styled("x", Style::default().fg(theme.hi_fg)));
-    spans.push(Span::styled(" kill ", Style::default().fg(theme.main_fg)));
+    spans.push(Span::styled(
+        format!(" {} ", t("footer.kill")),
+        Style::default().fg(theme.main_fg),
+    ));
     spans.push(Span::styled("/", Style::default().fg(theme.hi_fg)));
-    spans.push(Span::styled(" filter ", Style::default().fg(theme.main_fg)));
+    spans.push(Span::styled(
+        format!(" {} ", t("footer.filter")),
+        Style::default().fg(theme.main_fg),
+    ));
     spans.push(Span::styled("v", Style::default().fg(theme.hi_fg)));
-    spans.push(Span::styled(" view ", Style::default().fg(theme.main_fg)));
+    spans.push(Span::styled(
+        format!(" {} ", t("footer.view")),
+        Style::default().fg(theme.main_fg),
+    ));
     spans.push(Span::styled("c", Style::default().fg(theme.hi_fg)));
-    spans.push(Span::styled(" config ", Style::default().fg(theme.main_fg)));
+    spans.push(Span::styled(
+        format!(" {} ", t("footer.config")),
+        Style::default().fg(theme.main_fg),
+    ));
     spans.push(Span::styled("?", Style::default().fg(theme.hi_fg)));
-    spans.push(Span::styled(" help ", Style::default().fg(theme.main_fg)));
+    spans.push(Span::styled(
+        format!(" {} ", t("footer.help")),
+        Style::default().fg(theme.main_fg),
+    ));
     spans.push(Span::styled("q", Style::default().fg(theme.hi_fg)));
-    spans.push(Span::styled(" quit ", Style::default().fg(theme.main_fg)));
+    spans.push(Span::styled(
+        format!(" {} ", t("footer.quit")),
+        Style::default().fg(theme.main_fg),
+    ));
 
     // Show active filter or transient status
     if !app.filter_text.is_empty() {
@@ -55,13 +93,21 @@ pub(crate) fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             Style::default().fg(theme.status_fg),
         ));
     } else {
-        let status_text = app.status_msg.as_ref()
+        let status_text = app
+            .status_msg
+            .as_ref()
             .filter(|(_, when)| when.elapsed().as_secs() < 3)
             .map(|(msg, _)| msg.as_str());
         if let Some(msg) = status_text {
-            spans.push(Span::styled(format!(" {msg} "), Style::default().fg(theme.status_fg)));
+            spans.push(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(theme.status_fg),
+            ));
         } else {
-            spans.push(Span::styled("2s auto", Style::default().fg(theme.inactive_fg)));
+            spans.push(Span::styled(
+                t("footer.auto"),
+                Style::default().fg(theme.inactive_fg),
+            ));
         }
     }
 
@@ -73,20 +119,31 @@ pub(crate) fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             let mins_left = (18 - hour) * 60 - now.minute();
             let h = mins_left / 60;
             let m = mins_left % 60;
-            Some(format!("⚡Claude Peak Hours (resets in {}h{:02}m)", h, m))
+            let peak_label = t("footer.peak_hours");
+            let resets_in = t("footer.resets_in");
+            Some(format!("⚡{} ({} {}h{:02}m)", peak_label, resets_in, h, m))
         } else {
             None
         }
     };
     if let Some(ref peak) = peak_info {
-        spans.push(Span::styled(format!(" {peak} "), Style::default().fg(theme.warning_fg)));
+        spans.push(Span::styled(
+            format!(" {peak} "),
+            Style::default().fg(theme.warning_fg),
+        ));
     }
 
     let visible_count = app.visible_indices().len();
+    let sessions_label = t("footer.sessions");
     let count_label = if visible_count < app.sessions.len() {
-        format!("{}/{} sessions", visible_count, app.sessions.len())
+        format!(
+            "{}/{} {}",
+            visible_count,
+            app.sessions.len(),
+            sessions_label
+        )
     } else {
-        format!("{} sessions", app.sessions.len())
+        format!("{} {}", app.sessions.len(), sessions_label)
     };
     let used: usize = spans.iter().map(|s| s.content.len()).sum();
     let remaining = (area.width as usize).saturating_sub(used + 2);

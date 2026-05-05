@@ -21,7 +21,8 @@ pub fn scan_proc_fds(pid: u32) -> Vec<std::path::PathBuf> {
         Ok(e) => e,
         Err(_) => return vec![],
     };
-    entries.flatten()
+    entries
+        .flatten()
         .filter_map(|e| fs::read_link(e.path()).ok())
         .collect()
 }
@@ -96,12 +97,78 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
             continue; // kernel thread, skip
         }
 
-        map.insert(pid, ProcInfo { pid, ppid, rss_kb, cpu_pct, command });
+        map.insert(
+            pid,
+            ProcInfo {
+                pid,
+                ppid,
+                rss_kb,
+                cpu_pct,
+                command,
+            },
+        );
     }
     map
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub fn get_process_info() -> HashMap<u32, ProcInfo> {
+    use std::sync::{Mutex, OnceLock};
+
+    // sysinfo's `cpu_usage()` is a delta between two refreshes — a freshly
+    // constructed `System` always reports 0. Hold one across calls so the
+    // second tick onward returns real CPU%, instead of every Windows process
+    // looking idle (which would break `has_active_descendant` and the
+    // Working/Waiting threshold downstream).
+    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+    let sys_mutex = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
+    let mut sys = sys_mutex
+        .lock()
+        .expect("process-info system mutex poisoned");
+
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::new()
+            .with_cpu()
+            .with_memory()
+            .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+
+    let mut map = HashMap::new();
+    for (pid, proc_) in sys.processes() {
+        let pid_u32 = pid.as_u32();
+        // cmd() can be empty on Windows (cmdline retrieval failed for this
+        // process); fall back to the executable name so cmd_has_binary still
+        // matches `claude` / `codex` for those processes.
+        let command = if proc_.cmd().is_empty() {
+            proc_.name().to_string_lossy().into_owned()
+        } else {
+            proc_
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if command.is_empty() {
+            continue;
+        }
+        map.insert(
+            pid_u32,
+            ProcInfo {
+                pid: pid_u32,
+                ppid: proc_.parent().map(|p| p.as_u32()).unwrap_or(0),
+                rss_kb: proc_.memory() / 1024,
+                cpu_pct: proc_.cpu_usage() as f64,
+                command,
+            },
+        );
+    }
+    map
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 pub fn get_process_info() -> HashMap<u32, ProcInfo> {
     let mut map = HashMap::new();
     let output = Command::new("ps")
@@ -121,13 +188,16 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
                 ) {
                     let cpu = parts[3].parse::<f64>().unwrap_or(0.0);
                     let command = parts[4..].join(" ");
-                    map.insert(pid, ProcInfo {
+                    map.insert(
                         pid,
-                        ppid,
-                        rss_kb: rss,
-                        cpu_pct: cpu,
-                        command,
-                    });
+                        ProcInfo {
+                            pid,
+                            ppid,
+                            rss_kb: rss,
+                            cpu_pct: cpu,
+                            command,
+                        },
+                    );
                 }
             }
         }
@@ -157,7 +227,10 @@ pub fn has_active_descendant(
         }
         if let Some(kids) = children_map.get(&p) {
             for &kid in kids {
-                if process_info.get(&kid).is_some_and(|p| p.cpu_pct > cpu_threshold) {
+                if process_info
+                    .get(&kid)
+                    .is_some_and(|p| p.cpu_pct > cpu_threshold)
+                {
                     return true;
                 }
                 stack.push(kid);
@@ -228,7 +301,36 @@ pub fn get_listening_ports() -> HashMap<u32, Vec<u16>> {
     map
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub fn get_listening_ports() -> HashMap<u32, Vec<u16>> {
+    let mut map: HashMap<u32, Vec<u16>> = HashMap::new();
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .ok();
+
+    if let Some(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if !line.contains("LISTENING") {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let local_addr = parts.first();
+            let pid_str = parts.last();
+            if let (Some(addr), Some(pid_s)) = (local_addr, pid_str) {
+                if let (Some(port_str), Ok(pid)) = (addr.rsplit(':').next(), pid_s.parse::<u32>()) {
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        map.entry(pid).or_default().push(port);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 pub fn get_listening_ports() -> HashMap<u32, Vec<u16>> {
     let mut map: HashMap<u32, Vec<u16>> = HashMap::new();
     let output = Command::new("lsof")
@@ -240,8 +342,7 @@ pub fn get_listening_ports() -> HashMap<u32, Vec<u16>> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            let is_tcp_listen =
-                parts.len() >= 9 && parts[7] == "TCP" && line.contains("(LISTEN)");
+            let is_tcp_listen = parts.len() >= 9 && parts[7] == "TCP" && line.contains("(LISTEN)");
             if is_tcp_listen {
                 if let Ok(pid) = parts[1].parse::<u32>() {
                     if let Some(addr) = parts.get(8) {
@@ -258,14 +359,62 @@ pub fn get_listening_ports() -> HashMap<u32, Vec<u16>> {
     map
 }
 
+/// Return the last segment of a path-like string. Splits on `/` everywhere
+/// plus `\` on Windows, so non-Windows callers don't accidentally treat
+/// backslash as a separator (it's a legal filename character on unix).
+pub fn last_path_segment(s: &str) -> Option<&str> {
+    #[cfg(windows)]
+    let segment = s.rsplit(['/', '\\']).next();
+    #[cfg(not(windows))]
+    let segment = s.rsplit('/').next();
+    segment
+}
+
 /// Check if a command string has a given binary name in executable position.
 /// Checks the first two argv tokens only (covers direct invocation and
 /// interpreter-wrapped scripts like `node /path/to/codex ...`).
+///
+/// Also matches the autoupdater layout used by Claude Code 2.x where the
+/// running binary is named after its version (e.g.
+/// `~/.local/share/claude/versions/2.1.121`) — basename equality alone would
+/// miss this, so we also accept any path of the form `<...>/<name>/versions/<filename>`.
+#[cfg(not(windows))]
 pub fn cmd_has_binary(cmd: &str, name: &str) -> bool {
     let mut tokens = cmd.split_whitespace().take(2);
     tokens.any(|tok| {
-        let base = tok.rsplit('/').next().unwrap_or(tok);
-        base == name
+        let mut iter = tok.rsplit('/');
+        let base = iter.next().unwrap_or(tok);
+        if base == name {
+            return true;
+        }
+        matches!((iter.next(), iter.next()), (Some("versions"), Some(parent)) if parent == name)
+    })
+}
+
+/// Windows variant: also splits on `\`, strips a trailing `.exe` and common
+/// script extensions (`.js`, `.sh`, `.py`), and matches case-insensitively.
+/// Kept separate from the unix impl so non-Windows matching stays exact
+/// (`Claude` must not match `claude` on linux/macOS).
+#[cfg(windows)]
+pub fn cmd_has_binary(cmd: &str, name: &str) -> bool {
+    let mut tokens = cmd.split_whitespace().take(2);
+    tokens.any(|tok| {
+        let mut iter = tok.rsplit(['/', '\\']);
+        let base = iter.next().unwrap_or(tok);
+        let base = base
+            .strip_suffix(".exe")
+            .or_else(|| base.strip_suffix(".js"))
+            .or_else(|| base.strip_suffix(".sh"))
+            .or_else(|| base.strip_suffix(".py"))
+            .unwrap_or(base);
+        if base.eq_ignore_ascii_case(name) {
+            return true;
+        }
+        matches!(
+            (iter.next(), iter.next()),
+            (Some(versions), Some(parent))
+                if versions.eq_ignore_ascii_case("versions") && parent.eq_ignore_ascii_case(name)
+        )
     })
 }
 
@@ -300,4 +449,38 @@ pub fn collect_git_stats(cwd: &str) -> (u32, u32) {
     }
 
     (added, modified)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cmd_has_binary_basename_match() {
+        assert!(cmd_has_binary("/usr/local/bin/claude --foo", "claude"));
+        assert!(cmd_has_binary("claude", "claude"));
+        assert!(!cmd_has_binary("/usr/local/bin/claude-launch", "claude"));
+    }
+
+    #[test]
+    fn cmd_has_binary_autoupdater_layout() {
+        // Claude Code 2.x: actual binary is named after its version, but the
+        // path has `<name>/versions/<file>` structure we can match on.
+        assert!(cmd_has_binary(
+            "/Users/a/.local/share/claude/versions/2.1.121 --allow-dangerously-skip-permissions",
+            "claude",
+        ));
+        assert!(cmd_has_binary("/opt/codex/versions/0.42.0 --foo", "codex",));
+    }
+
+    #[test]
+    fn cmd_has_binary_does_not_overmatch() {
+        // A sibling dir under `claude/` but not under `versions/` shouldn't match.
+        assert!(!cmd_has_binary(
+            "/Users/a/.local/share/claude/foo",
+            "claude"
+        ));
+        // A `versions/` dir not under `<name>/` shouldn't match either.
+        assert!(!cmd_has_binary("/some/versions/2.1.121", "claude"));
+    }
 }

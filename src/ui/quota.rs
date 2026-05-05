@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::locale::t;
 use crate::model::RateLimitInfo;
 use crate::theme::Theme;
 use ratatui::layout::Rect;
@@ -48,9 +49,17 @@ pub(crate) fn draw_quota_panel(f: &mut Frame, app: &App, area: Rect, theme: &The
         } else {
             col_w
         };
-        let col_area = Rect { x: col_x, y: inner.y, width: this_w, height: content_h };
+        let col_area = Rect {
+            x: col_x,
+            y: inner.y,
+            width: this_w,
+            height: content_h,
+        };
 
-        let rl = app.rate_limits.iter().find(|r| r.source.eq_ignore_ascii_case(source));
+        let rl = app
+            .rate_limits
+            .iter()
+            .find(|r| r.source.eq_ignore_ascii_case(source));
         draw_source_column(f, col_area, source, rl, &cpu_grad, theme);
     }
 
@@ -61,10 +70,20 @@ pub(crate) fn draw_quota_panel(f: &mut Frame, app: &App, area: Rect, theme: &The
         width: inner.width,
         height: 1,
     };
-    f.render_widget(Paragraph::new(vec![Line::from(vec![
-        Span::styled(format!(" {}", fmt_tokens(total_tokens)), Style::default().fg(theme.main_fg)),
-        Span::styled(format!(" {}/min", fmt_tokens(tokens_per_min as u64)), Style::default().fg(theme.graph_text)),
-    ])]), bottom_area);
+    let total_label = t("quota.total");
+    f.render_widget(
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled(
+                format!(" {} {}", total_label, fmt_tokens(total_tokens)),
+                Style::default().fg(theme.main_fg),
+            ),
+            Span::styled(
+                format!(" {}/min", fmt_tokens(tokens_per_min as u64)),
+                Style::default().fg(theme.graph_text),
+            ),
+        ])]),
+        bottom_area,
+    );
 }
 
 fn draw_source_column(
@@ -80,17 +99,26 @@ fn draw_source_column(
 
     let Some(rl) = rl else {
         let hint = if source.eq_ignore_ascii_case("claude") {
-            "  abtop --setup"
+            t("quota.abtop_setup")
         } else {
-            "  run codex once"
+            t("quota.run_codex")
         };
+        let no_data = t("quota.no_data");
         let lines = vec![
             Line::from(Span::styled(
                 format!(" {}", source.to_uppercase()),
-                Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled("  — no data", Style::default().fg(theme.inactive_fg))),
-            Line::from(Span::styled(hint, Style::default().fg(theme.graph_text))),
+            Line::from(Span::styled(
+                format!("  — {}", no_data),
+                Style::default().fg(theme.inactive_fg),
+            )),
+            Line::from(Span::styled(
+                format!(" {}", hint),
+                Style::default().fg(theme.graph_text),
+            )),
         ];
         f.render_widget(Paragraph::new(lines), area);
         return;
@@ -103,13 +131,22 @@ fn draw_source_column(
     let ago_secs = rl.updated_at.map(|ts| now.saturating_sub(ts));
     let is_stale = ago_secs.is_some_and(|s| s > STALE_SECS);
 
-    let fresh_str = ago_secs.map(format_ago).unwrap_or_default();
-    let fresh_color = if is_stale { theme.inactive_fg } else { theme.graph_text };
+    let ago_label = t("quota.ago");
+    let fresh_str = ago_secs
+        .map(|s| format!("{}{}", s, ago_label))
+        .unwrap_or_default();
+    let fresh_color = if is_stale {
+        theme.inactive_fg
+    } else {
+        theme.graph_text
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     let mut label_spans = vec![Span::styled(
         format!(" {}", rl.source.to_uppercase()),
-        Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.title)
+            .add_modifier(Modifier::BOLD),
     )];
     if !fresh_str.is_empty() {
         label_spans.push(Span::styled(fresh_str, Style::default().fg(fresh_color)));
@@ -118,43 +155,56 @@ fn draw_source_column(
 
     if let Some(used_pct) = rl.five_hour_pct {
         let remaining = (100.0 - used_pct).clamp(0.0, 100.0);
-        let reset = rl.five_hour_resets_at.map(format_reset_time).unwrap_or_default();
+        let reset = rl
+            .five_hour_resets_at
+            .map(format_reset_time)
+            .unwrap_or_default();
         let c = grad_at(cpu_grad, used_pct);
-        let mut s = vec![styled_label(" 5h ", theme.graph_text)];
+        let label_5h = t("quota.5h");
+        let mut s = vec![styled_label(
+            format!(" {}", label_5h).as_str(),
+            theme.graph_text,
+        )];
         s.extend(remaining_bar(remaining, bar_w, cpu_grad, theme.meter_bg));
-        s.push(Span::styled(format!(" {:>3.0}%", remaining), Style::default().fg(c)));
+        s.push(Span::styled(
+            format!(" {:>3.0}%", remaining),
+            Style::default().fg(c),
+        ));
         lines.push(Line::from(s));
         if !reset.is_empty() {
-            lines.push(Line::from(Span::styled(format!("  {}", reset), Style::default().fg(theme.graph_text))));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", reset),
+                Style::default().fg(theme.graph_text),
+            )));
         }
     }
     if let Some(used_pct) = rl.seven_day_pct {
         let remaining = (100.0 - used_pct).clamp(0.0, 100.0);
-        let reset = rl.seven_day_resets_at.map(format_reset_time).unwrap_or_default();
+        let reset = rl
+            .seven_day_resets_at
+            .map(format_reset_time)
+            .unwrap_or_default();
         let c = grad_at(cpu_grad, used_pct);
-        let mut s = vec![styled_label(" 7d ", theme.graph_text)];
+        let label_7d = t("quota.7d");
+        let mut s = vec![styled_label(
+            format!(" {}", label_7d).as_str(),
+            theme.graph_text,
+        )];
         s.extend(remaining_bar(remaining, bar_w, cpu_grad, theme.meter_bg));
-        s.push(Span::styled(format!(" {:>3.0}%", remaining), Style::default().fg(c)));
+        s.push(Span::styled(
+            format!(" {:>3.0}%", remaining),
+            Style::default().fg(c),
+        ));
         lines.push(Line::from(s));
         if !reset.is_empty() {
-            lines.push(Line::from(Span::styled(format!("  {}", reset), Style::default().fg(theme.graph_text))));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", reset),
+                Style::default().fg(theme.graph_text),
+            )));
         }
     }
 
     f.render_widget(Paragraph::new(lines), area);
-}
-
-/// Format an "N ago" badge with auto-scaling unit (s → m → h → d).
-fn format_ago(secs: u64) -> String {
-    if secs < 60 {
-        format!(" {}s ago", secs)
-    } else if secs < 3600 {
-        format!(" {}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!(" {}h ago", secs / 3600)
-    } else {
-        format!(" {}d ago", secs / 86400)
-    }
 }
 
 /// Format a reset timestamp as relative time (e.g., "1h 23m")
@@ -164,16 +214,24 @@ pub(crate) fn format_reset_time(reset_ts: u64) -> String {
         .unwrap_or_default()
         .as_secs();
     if reset_ts <= now {
-        return "now".to_string();
+        return t("quota.now");
     }
     let diff = reset_ts - now;
     if diff < 60 {
-        format!("{}s", diff)
+        format!("{}{}", diff, t("time.s"))
     } else if diff < 3600 {
-        format!("{}m", diff / 60)
+        format!("{}{}", diff / 60, t("time.m"))
     } else if diff < 86400 {
-        format!("{}h {}m", diff / 3600, (diff % 3600) / 60)
+        let h = diff / 3600;
+        let m = (diff % 3600) / 60;
+        let h_label = t("time.h");
+        let m_label = t("time.m");
+        format!("{}{} {}{}", h, h_label, m, m_label)
     } else {
-        format!("{}d {}h", diff / 86400, (diff % 86400) / 3600)
+        let d = diff / 86400;
+        let h = (diff % 86400) / 3600;
+        let d_label = t("time.d");
+        let h_label = t("time.h");
+        format!("{}{} {}{}", d, d_label, h, h_label)
     }
 }
