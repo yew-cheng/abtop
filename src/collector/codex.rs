@@ -395,7 +395,7 @@ impl CodexCollector {
             }
 
             // Sort by modification time descending (most recent first)
-            candidates.sort_by(|a, b| b.1.cmp(&a.1));
+            candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
             // Assign candidates to PIDs (most recent file → first PID)
             for (i, &pid_u32) in pids.iter().enumerate() {
