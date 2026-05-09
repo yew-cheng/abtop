@@ -4,6 +4,16 @@ AI agent monitor for your terminal. Like btop++, but for AI coding agents.
 
 Supports Claude Code, Codex CLI, and OpenCode sessions.
 
+## Language Policy
+
+English is mandatory for all project-facing work and communication.
+
+- Write all source code, comments, tests, fixtures, documentation, examples, configuration text, scripts, and user-facing strings in English.
+- Use English for every GitHub artifact: issue titles and bodies, issue comments, pull request titles and descriptions, review comments, commit messages, branch names, release notes, changelogs, discussions, labels, milestones, and workflow or CI messages.
+- Do not use non-English text in repository content or GitHub communication unless it is an exact external identifier, a required protocol value, or a direct quote needed for context.
+- When quoting or preserving non-English input, add an English explanation and keep the non-English text as short as possible.
+- If a contributor opens an issue, comment, or review in another language, respond in English and continue the thread in English.
+
 ## Architecture
 
 ```
