@@ -52,7 +52,6 @@ abtop --once             # Print snapshot and exit
 abtop --json             # Print one JSON snapshot and exit (for scripts/tools)
 abtop --setup            # Install rate limit collection hook
 abtop --theme dracula    # Launch with a specific theme
-abtop --http 8787        # Run headless HTTP server
 ```
 
 Recommended terminal size: **120x40** or larger. Minimum 80x24 — panels hide gracefully when small.
@@ -186,44 +185,6 @@ let json = serde_json::to_string(&app.to_snapshot(2_000)).unwrap();
 `App` is not `Send` (it owns the collectors), so keep it on one thread and pass
 the serialized JSON elsewhere. [abtop-web-ui](https://github.com/XKHoshizora/abtop-web-ui)
 is a reference consumer: a local-first web dashboard built on exactly this API.
-
-### HTTP server
-
-Run abtop headlessly and expose the snapshot over HTTP:
-
-```bash
-abtop --http         # default port 8787
-abtop --http 8080    # custom port
-```
-
-Endpoints:
-
-| Endpoint     | Description |
-| ------------ | ----------- |
-| `GET /`      | Minimal health/status summary |
-| `GET /health`| Minimal health/status summary |
-| `GET /status`| Full JSON snapshot (same shape as `--json`) |
-
-`/health` returns a small payload ideal for dashboards that only need whether
-abtop is running and the per-session status:
-
-```json
-{
-  "running": true,
-  "snapshot_ready": true,
-  "updated_at_ms": 1781432892151,
-  "session_count": 2,
-  "sessions": [
-    {"agent_cli": "kimi", "pid": 5549, "project_name": "abtop", "status": "Executing"},
-    {"agent_cli": "kimi", "pid": 28123, "project_name": "abtop", "status": "Waiting"}
-  ],
-  "error": null
-}
-```
-
-The server refreshes its snapshot every 2 seconds. It is intended for local
-consumption only; add your own reverse proxy or firewall rules if you expose it
-beyond `localhost`.
 
 ## Privacy
 
