@@ -199,12 +199,11 @@ abtop --http 8080    # custom port
 
 Endpoints:
 
-| Endpoint      | Description |
-| ------------- | ----------- |
-| `GET /`       | Minimal health/status summary |
-| `GET /health` | Minimal health/status summary |
-| `GET /status` | Full JSON snapshot (same shape as `--json`) |
-| `GET /events` | Server-Sent Events stream; pushes a fresh snapshot every 2s |
+| Endpoint     | Description |
+| ------------ | ----------- |
+| `GET /`      | Minimal health/status summary |
+| `GET /health`| Minimal health/status summary |
+| `GET /status`| Full JSON snapshot (same shape as `--json`) |
 
 `/health` returns a small payload ideal for dashboards that only need whether
 abtop is running and the per-session status:
@@ -226,30 +225,6 @@ abtop is running and the per-session status:
 The server refreshes its snapshot every 2 seconds. It is intended for local
 consumption only; add your own reverse proxy or firewall rules if you expose it
 beyond `localhost`.
-
-### Server push (`/events`)
-
-For real-time dashboards, connect to the SSE endpoint instead of polling:
-
-```bash
-curl -N -H "Accept: text/event-stream" http://localhost:8787/events
-```
-
-Each tick produces one line:
-
-```
-data: {"generated_at_ms": ..., "sessions": [...], ...}
-```
-
-Browser example:
-
-```javascript
-const es = new EventSource("http://localhost:8787/events");
-es.onmessage = (e) => {
-  const snap = JSON.parse(e.data);
-  console.log(snap.session_count, snap.sessions.map((s) => s.status));
-};
-```
 
 ## Privacy
 
