@@ -8,6 +8,8 @@ Supports Claude Code, Codex CLI, and OpenCode sessions.
 
 English is mandatory for all project-facing work and communication.
 
+- Direct conversation with the project owner may be conducted in Chinese when the owner explicitly requests it; however, all code, comments, tests, fixtures, examples, configuration text, scripts, and user-facing strings remain in English.
+- Documentation is maintained in English by default. Translations into other languages may be added when explicitly requested by the project owner.
 - Write all source code, comments, tests, fixtures, documentation, examples, configuration text, scripts, and user-facing strings in English.
 - Use English for every GitHub artifact: issue titles and bodies, issue comments, pull request titles and descriptions, review comments, commit messages, branch names, release notes, changelogs, discussions, labels, milestones, and workflow or CI messages.
 - Do not use non-English text in repository content or GitHub communication unless it is an exact external identifier, a required protocol value, or a direct quote needed for context.
@@ -33,6 +35,7 @@ src/
 ├── main.rs                 # Entry, terminal setup, event loop, --setup flag
 ├── app.rs                  # App state, tick logic, key handling, summary generation
 ├── setup.rs                # StatusLine hook installation (abtop --setup)
+├── sse_server.rs           # Built-in HTTP SSE server for session-status pushes
 ├── ui/
 │   └── mod.rs              # All panels in single file: header, context, quota,
 │                           # tokens, projects, ports, sessions, footer
@@ -399,8 +402,33 @@ Session jump (`Enter`) only works when abtop runs inside tmux:
 abtop reads transcripts, prompts, tool inputs, and memory files. These may contain secrets.
 - **`--once` output**: redact file contents from tool_use inputs. Show tool name + file path only, not content.
 - **TUI mode**: show tool name + first arg (file path), never show file contents or prompt text in session list.
-- **No network**: abtop never sends data anywhere. All local reads.
+- **No outbound network**: abtop never initiates external connections. All reads are local.
+- **Local SSE server**: in normal TUI mode abtop listens on loopback (`127.0.0.1:8787` by default) and pushes session-status events to any connected client. See [HTTP SSE server](#http-sse-server).
 - **Exception**: summary generation calls `claude --print` locally (no network by abtop itself, but claude may use its API).
+
+## HTTP SSE server
+
+In normal TUI mode abtop starts a minimal built-in HTTP server on `127.0.0.1:8787`, falling back to an ephemeral port if `8787` is occupied. The listening address is shown briefly in the footer status line on startup.
+
+- **Endpoint**: `GET /events`
+- **Response**: `Content-Type: text/event-stream`
+- **Push trigger**: at the end of each 2-second tick, if any session's `SessionStatus` changed or if a session appeared/disappeared, all connected clients receive one SSE event.
+- **Payload**: a JSON array containing every current session:
+  ```json
+  [
+    {"session_id":"...","agent_cli":"claude","pid":1234,"status":"Thinking"},
+    {"session_id":"...","agent_cli":"codex","pid":5678,"status":"Waiting"}
+  ]
+  ```
+
+The server is **not** started in `--demo`, `--once`, `--json`, `--setup`, `--version`, or `--update` modes, so those commands remain non-networking.
+
+A tiny example client is provided at `scripts/abtop-sse-client.py`:
+```bash
+./scripts/abtop-sse-client.py
+# or with a custom URL
+ABTOP_SSE_URL=http://127.0.0.1:8787/events ./scripts/abtop-sse-client.py
+```
 
 ## Gotchas
 

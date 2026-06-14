@@ -60,10 +60,12 @@ pub mod locale;
 pub mod model;
 pub mod setup;
 pub mod snapshot;
+pub mod sse_server;
 pub mod theme;
 pub mod ui;
 
 use app::{App, JumpOutcome};
+use crate::model::SessionStatus;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
     MouseEvent, MouseEventKind,
@@ -73,6 +75,7 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, stdout};
 use std::time::Duration;
 
@@ -232,6 +235,24 @@ fn run_app(
         app.tick();
     }
 
+    // Start the built-in SSE server in normal mode. Demo mode skips it so
+    // synthetic session churn is not pushed to third-party listeners.
+    let sse_server = if !demo_mode {
+        match sse_server::SseServer::start() {
+            Ok(server) => {
+                app.set_status(format!("SSE server listening on {}", server.addr()));
+                Some(server)
+            }
+            Err(e) => {
+                app.set_status(format!("SSE server failed: {}", e));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut prev_statuses: HashMap<String, SessionStatus> = HashMap::new();
+
     let mut last_tick = std::time::Instant::now();
     let tick_interval = Duration::from_secs(2);
     let render_interval = Duration::from_millis(500);
@@ -334,6 +355,29 @@ fn run_app(
         } else if !had_input && last_tick.elapsed() >= tick_interval {
             // Data tick every 2s — skip when handling input to avoid lag
             app.tick();
+
+            // Push all session statuses to SSE listeners whenever the set of
+            // sessions changes (added/removed) or any existing session's status
+            // changes. Token/context fluctuations without status changes are
+            // intentionally not broadcast so clients are not spammed.
+            if let Some(ref server) = sse_server {
+                let current_ids: HashSet<String> =
+                    app.sessions.iter().map(|s| s.session_id.clone()).collect();
+                let prev_ids: HashSet<String> = prev_statuses.keys().cloned().collect();
+                let changed = current_ids != prev_ids
+                    || app
+                        .sessions
+                        .iter()
+                        .any(|s| prev_statuses.get(&s.session_id) != Some(&s.status));
+                if changed {
+                    server.broadcast_sessions(&app.sessions);
+                }
+                prev_statuses.clear();
+                for s in &app.sessions {
+                    prev_statuses.insert(s.session_id.clone(), s.status.clone());
+                }
+            }
+
             last_tick = std::time::Instant::now();
         }
 
