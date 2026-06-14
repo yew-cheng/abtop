@@ -58,6 +58,7 @@ pub mod demo;
 pub mod host_info;
 pub mod locale;
 pub mod model;
+pub mod server;
 pub mod setup;
 pub mod snapshot;
 pub mod theme;
@@ -103,6 +104,15 @@ pub fn run() -> io::Result<()> {
     if std::env::args().any(|a| a == "--setup") {
         setup::run_setup();
         return Ok(());
+    }
+
+    // --http flag: run headless HTTP server and exit.
+    if let Some(pos) = std::env::args().position(|a| a == "--http") {
+        let port = std::env::args()
+            .nth(pos + 1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(8787);
+        return server::run_http(&format!("0.0.0.0:{}", port));
     }
 
     // Load config once; it drives both the default theme and the hidden-agents list.
