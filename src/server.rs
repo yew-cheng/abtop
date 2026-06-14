@@ -1,8 +1,13 @@
 //! Headless HTTP server exposing abtop monitor state.
 //!
-//! Runs the data collector on a dedicated thread and serves the latest
-//! serialized [`Snapshot`] over HTTP. This keeps the non-`Send` [`App`] on the
-//! collector thread while request handlers only touch an `Arc<Mutex<String>>`.
+//! Can run in two modes:
+//!
+//! 1. **Headless** (`--http`): owns an [`App`] on a dedicated collector thread
+//!    and serves the resulting snapshots.
+//! 2. **TUI-backed** (default): the TUI owns the [`App`]; after each tick it
+//!    publishes the snapshot JSON to a shared [`HttpServer`] that runs in a
+//!    background thread. This keeps the non-`Send` [`App`] on the TUI thread
+//!    while request handlers only touch shared strings/channels.
 
 use crate::app::App;
 use crate::{config, theme::Theme};
@@ -13,7 +18,7 @@ use std::thread;
 use std::time::Duration;
 use tiny_http::{Header, Response, Server, StatusCode};
 
-/// Latest monitor state shared between the collector and HTTP threads.
+/// Latest monitor state shared between the publisher and HTTP threads.
 struct ServerState {
     /// Full JSON snapshot from the last successful tick.
     json: String,
@@ -34,8 +39,8 @@ impl ServerState {
 }
 
 /// Active SSE clients. Each entry is a sender that pushes a full JSON snapshot
-/// whenever the collector finishes a tick. Dead senders are lazily cleaned up
-/// on the next broadcast.
+/// whenever a new snapshot is published. Dead senders are lazily cleaned up on
+/// the next broadcast.
 type Subscribers = Arc<Mutex<Vec<Sender<String>>>>;
 
 fn content_type_json() -> Header {
@@ -82,109 +87,138 @@ fn broadcast(subscribers: &Subscribers, json: String) {
     subs.retain(|tx| tx.send(json.clone()).is_ok());
 }
 
-/// Start the collector thread and block serving HTTP on `addr`.
-pub fn run_http(addr: &str) -> io::Result<()> {
-    let state = Arc::new(Mutex::new(ServerState::empty()));
-    let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+/// Shared HTTP server state. Cheap to clone: all fields are `Arc`s.
+#[derive(Clone)]
+pub struct HttpServer {
+    state: Arc<Mutex<ServerState>>,
+    subscribers: Subscribers,
+    addr: String,
+}
 
-    // Collector thread: owns the App (which is !Send) and refreshes the snapshot.
-    let state_for_collector = Arc::clone(&state);
-    let subs_for_collector = Arc::clone(&subscribers);
-    let cfg = config::load_config();
-    let theme = Theme::by_name(&cfg.theme).unwrap_or_default();
-    thread::spawn(move || {
-        let mut app = App::new_with_config_and_claude_dirs(
-            theme,
-            &cfg.hidden_agents,
-            cfg.panels,
-            &cfg.claude_config_dirs,
-        );
-
-        loop {
-            app.tick_no_summaries();
-            match serde_json::to_string(&app.to_snapshot(2_000)) {
-                Ok(json) => {
-                    let mut st = state_for_collector.lock().unwrap();
-                    st.json = json.clone();
-                    st.updated_at_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    st.last_error = None;
-                    drop(st);
-                    broadcast(&subs_for_collector, json);
-                }
-                Err(e) => {
-                    let mut st = state_for_collector.lock().unwrap();
-                    st.last_error = Some(e.to_string());
-                }
-            }
-            thread::sleep(Duration::from_secs(2));
-        }
-    });
-
-    let server = Server::http(addr).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!("failed to bind HTTP server to {}: {}", addr, e),
-        )
-    })?;
-
-    println!("abtop HTTP server listening on http://{}", addr);
-    println!("endpoints: GET /status  GET /health  GET /events");
-
-    for request in server.incoming_requests() {
-        // SSE is handled separately because its response body type differs from
-        // the simple in-memory responses used by the other endpoints.
-        if request.url() == "/events" {
-            let (tx, rx) = mpsc::channel::<String>();
-            subscribers.lock().unwrap().push(tx);
-            if let Err(e) = request.respond(sse_response(SseBody::new(rx))) {
-                eprintln!("abtop http: failed to respond: {}", e);
-            }
-            continue;
-        }
-
-        let response = match request.url() {
-            "/status" => {
-                let st = state.lock().unwrap();
-                if st.json.is_empty() {
-                    text_response(
-                        StatusCode(503),
-                        "snapshot not ready yet".as_bytes().to_vec(),
-                    )
-                } else {
-                    json_response(st.json.clone())
-                }
-            }
-            "/health" | "/" => {
-                let st = state.lock().unwrap();
-                // Minimal health payload derived from the cached snapshot.
-                let (session_count, sessions) = if st.json.is_empty() {
-                    (0, Vec::new())
-                } else {
-                    parse_minimal_sessions(&st.json)
-                };
-
-                let payload = serde_json::json!({
-                    "running": true,
-                    "snapshot_ready": !st.json.is_empty(),
-                    "updated_at_ms": st.updated_at_ms,
-                    "session_count": session_count,
-                    "sessions": sessions,
-                    "error": st.last_error,
-                });
-                json_response(payload.to_string())
-            }
-            _ => text_response(StatusCode(404), "not found".as_bytes().to_vec()),
-        };
-
-        if let Err(e) = request.respond(response) {
-            eprintln!("abtop http: failed to respond: {}", e);
+impl HttpServer {
+    /// Create a new server binding to `addr` (e.g. `"0.0.0.0:8787"`).
+    pub fn new(addr: &str) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ServerState::empty())),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+            addr: addr.to_string(),
         }
     }
 
-    Ok(())
+    /// Publish a snapshot. Updates `/status`/`/health` caches and pushes to all
+    /// connected `/events` clients.
+    pub fn publish(&self, json: String) {
+        {
+            let mut st = self.state.lock().unwrap();
+            st.json = json.clone();
+            st.updated_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            st.last_error = None;
+        }
+        broadcast(&self.subscribers, json);
+    }
+
+    /// Spawn a background collector that owns an [`App`] and publishes snapshots
+    /// on every tick. Used by headless mode (`--http`).
+    pub fn spawn_collector(&self) {
+        let publisher = self.clone();
+        let cfg = config::load_config();
+        let theme = Theme::by_name(&cfg.theme).unwrap_or_default();
+        thread::spawn(move || {
+            let mut app = App::new_with_config_and_claude_dirs(
+                theme,
+                &cfg.hidden_agents,
+                cfg.panels,
+                &cfg.claude_config_dirs,
+            );
+            loop {
+                app.tick_no_summaries();
+                if let Ok(json) = serde_json::to_string(&app.to_snapshot(2_000)) {
+                    publisher.publish(json);
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+    }
+
+    /// Block serving HTTP. Can run on the main thread (headless) or a
+    /// background thread (TUI-backed).
+    pub fn serve(&self) -> io::Result<()> {
+        let state = Arc::clone(&self.state);
+        let subscribers = Arc::clone(&self.subscribers);
+
+        let server = Server::http(&self.addr).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("failed to bind HTTP server to {}: {}", self.addr, e),
+            )
+        })?;
+
+        println!("abtop HTTP server listening on http://{}", self.addr);
+        println!("endpoints: GET /status  GET /health  GET /events");
+
+        for request in server.incoming_requests() {
+            // SSE is handled separately because its response body type differs
+            // from the simple in-memory responses used by the other endpoints.
+            if request.url() == "/events" {
+                let (tx, rx) = mpsc::channel::<String>();
+                subscribers.lock().unwrap().push(tx);
+                if let Err(e) = request.respond(sse_response(SseBody::new(rx))) {
+                    eprintln!("abtop http: failed to respond: {}", e);
+                }
+                continue;
+            }
+
+            let response = match request.url() {
+                "/status" => {
+                    let st = state.lock().unwrap();
+                    if st.json.is_empty() {
+                        text_response(
+                            StatusCode(503),
+                            "snapshot not ready yet".as_bytes().to_vec(),
+                        )
+                    } else {
+                        json_response(st.json.clone())
+                    }
+                }
+                "/health" | "/" => {
+                    let st = state.lock().unwrap();
+                    let (session_count, sessions) = if st.json.is_empty() {
+                        (0, Vec::new())
+                    } else {
+                        parse_minimal_sessions(&st.json)
+                    };
+
+                    let payload = serde_json::json!({
+                        "running": true,
+                        "snapshot_ready": !st.json.is_empty(),
+                        "updated_at_ms": st.updated_at_ms,
+                        "session_count": session_count,
+                        "sessions": sessions,
+                        "error": st.last_error,
+                    });
+                    json_response(payload.to_string())
+                }
+                _ => text_response(StatusCode(404), "not found".as_bytes().to_vec()),
+            };
+
+            if let Err(e) = request.respond(response) {
+                eprintln!("abtop http: failed to respond: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Run abtop in headless HTTP mode. Starts a collector thread and blocks on the
+/// HTTP server.
+pub fn run_http(addr: &str) -> io::Result<()> {
+    let server = HttpServer::new(addr);
+    server.spawn_collector();
+    server.serve()
 }
 
 /// Extract just enough session info for `/health` without re-parsing the whole
@@ -213,8 +247,8 @@ fn parse_minimal_sessions(json: &str) -> (usize, Vec<serde_json::Value>) {
     (list.len(), list)
 }
 
-/// SSE response body backed by a channel. Blocks until the collector broadcasts
-/// the next snapshot, then emits it as an `data: ...` event.
+/// SSE response body backed by a channel. Blocks until a snapshot is published,
+/// then emits it as a `data: ...` event.
 struct SseBody {
     rx: mpsc::Receiver<String>,
     buf: Vec<u8>,

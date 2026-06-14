@@ -75,6 +75,7 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use std::io::{self, stdout};
+use std::thread;
 use std::time::Duration;
 
 /// Construct a headless `App` from loaded config + theme. Shared by the
@@ -106,15 +107,6 @@ pub fn run() -> io::Result<()> {
     if args.iter().any(|a| a == "--setup") {
         setup::run_setup();
         return Ok(());
-    }
-
-    // --http flag: run headless HTTP server and exit.
-    if let Some(pos) = args.iter().position(|a| a == "--http") {
-        let port = args
-            .get(pos + 1)
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(8787);
-        return server::run_http(&format!("0.0.0.0:{}", port));
     }
 
     // Load config once; it drives both the default theme and the hidden-agents list.
@@ -199,18 +191,27 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
 
-    // TUI mode is opt-in. Anything that clearly belongs to the terminal UI
-    // (explicit --tui, theme selection, demo, or jump-on-enter) switches to it.
-    let tui_mode = args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--tui" | "--theme" | "--demo" | "--exit-on-jump"
-        )
-    });
-
-    if !tui_mode {
-        return server::run_http("0.0.0.0:8787");
+    // --http flag: headless HTTP server only.
+    if args.iter().any(|a| a == "--http") {
+        let port = args
+            .iter()
+            .position(|a| a == "--http")
+            .and_then(|pos| args.get(pos + 1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(8787);
+        return server::run_http(&format!("0.0.0.0:{}", port));
     }
+
+    // Start a background HTTP server so third-party tools can query status even
+    // while the TUI is running. It shares nothing with the TUI except published
+    // JSON snapshots.
+    let http_server = server::HttpServer::new("0.0.0.0:8787");
+    let http_server_for_thread = http_server.clone();
+    thread::spawn(move || {
+        if let Err(e) = http_server_for_thread.serve() {
+            eprintln!("abtop http server error: {}", e);
+        }
+    });
 
     // Setup terminal
     enable_raw_mode()?;
@@ -226,6 +227,7 @@ pub fn run() -> io::Result<()> {
         &cfg.hidden_agents,
         cfg.panels,
         &cfg.claude_config_dirs,
+        http_server,
     );
 
     // Always attempt both cleanup steps regardless of app result
@@ -237,6 +239,7 @@ pub fn run() -> io::Result<()> {
     app_result.and(r1).and(r2).and(r3)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     demo_mode: bool,
@@ -245,6 +248,7 @@ fn run_app(
     hidden_agents: &[String],
     panels: config::PanelVisibility,
     claude_config_dirs: &[std::path::PathBuf],
+    http_server: server::HttpServer,
 ) -> io::Result<()> {
     let mut app = App::new_with_config_and_claude_dirs(
         initial_theme.unwrap_or_default(),
@@ -256,6 +260,9 @@ fn run_app(
         demo::populate_demo(&mut app);
     } else {
         app.tick();
+    }
+    if let Ok(json) = serde_json::to_string(&app.to_snapshot(2_000)) {
+        http_server.publish(json);
     }
 
     let mut last_tick = std::time::Instant::now();
@@ -360,6 +367,9 @@ fn run_app(
         } else if !had_input && last_tick.elapsed() >= tick_interval {
             // Data tick every 2s — skip when handling input to avoid lag
             app.tick();
+            if let Ok(json) = serde_json::to_string(&app.to_snapshot(2_000)) {
+                http_server.publish(json);
+            }
             last_tick = std::time::Instant::now();
         }
 
