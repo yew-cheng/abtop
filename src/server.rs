@@ -6,7 +6,8 @@
 
 use crate::app::App;
 use crate::{config, theme::Theme};
-use std::io;
+use std::io::{self, Read};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -32,6 +33,11 @@ impl ServerState {
     }
 }
 
+/// Active SSE clients. Each entry is a sender that pushes a full JSON snapshot
+/// whenever the collector finishes a tick. Dead senders are lazily cleaned up
+/// on the next broadcast.
+type Subscribers = Arc<Mutex<Vec<Sender<String>>>>;
+
 fn content_type_json() -> Header {
     Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()
 }
@@ -56,12 +62,34 @@ fn json_response(json: String) -> Response<io::Cursor<Vec<u8>>> {
     )
 }
 
+fn sse_response(body: SseBody) -> Response<SseBody> {
+    Response::new(
+        StatusCode(200),
+        vec![
+            Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap(),
+            Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap(),
+        ],
+        body,
+        None,
+        None,
+    )
+}
+
+/// Push a fresh JSON snapshot to every connected SSE client, removing any whose
+/// receiver has dropped.
+fn broadcast(subscribers: &Subscribers, json: String) {
+    let mut subs = subscribers.lock().unwrap();
+    subs.retain(|tx| tx.send(json.clone()).is_ok());
+}
+
 /// Start the collector thread and block serving HTTP on `addr`.
 pub fn run_http(addr: &str) -> io::Result<()> {
     let state = Arc::new(Mutex::new(ServerState::empty()));
+    let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
 
     // Collector thread: owns the App (which is !Send) and refreshes the snapshot.
     let state_for_collector = Arc::clone(&state);
+    let subs_for_collector = Arc::clone(&subscribers);
     let cfg = config::load_config();
     let theme = Theme::by_name(&cfg.theme).unwrap_or_default();
     thread::spawn(move || {
@@ -77,12 +105,14 @@ pub fn run_http(addr: &str) -> io::Result<()> {
             match serde_json::to_string(&app.to_snapshot(2_000)) {
                 Ok(json) => {
                     let mut st = state_for_collector.lock().unwrap();
-                    st.json = json;
+                    st.json = json.clone();
                     st.updated_at_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     st.last_error = None;
+                    drop(st);
+                    broadcast(&subs_for_collector, json);
                 }
                 Err(e) => {
                     let mut st = state_for_collector.lock().unwrap();
@@ -101,9 +131,20 @@ pub fn run_http(addr: &str) -> io::Result<()> {
     })?;
 
     println!("abtop HTTP server listening on http://{}", addr);
-    println!("endpoints: GET /status  GET /health");
+    println!("endpoints: GET /status  GET /health  GET /events");
 
     for request in server.incoming_requests() {
+        // SSE is handled separately because its response body type differs from
+        // the simple in-memory responses used by the other endpoints.
+        if request.url() == "/events" {
+            let (tx, rx) = mpsc::channel::<String>();
+            subscribers.lock().unwrap().push(tx);
+            if let Err(e) = request.respond(sse_response(SseBody::new(rx))) {
+                eprintln!("abtop http: failed to respond: {}", e);
+            }
+            continue;
+        }
+
         let response = match request.url() {
             "/status" => {
                 let st = state.lock().unwrap();
@@ -170,4 +211,41 @@ fn parse_minimal_sessions(json: &str) -> (usize, Vec<serde_json::Value>) {
         None => Vec::new(),
     };
     (list.len(), list)
+}
+
+/// SSE response body backed by a channel. Blocks until the collector broadcasts
+/// the next snapshot, then emits it as an `data: ...` event.
+struct SseBody {
+    rx: mpsc::Receiver<String>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl SseBody {
+    fn new(rx: mpsc::Receiver<String>) -> Self {
+        Self {
+            rx,
+            buf: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl Read for SseBody {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            match self.rx.recv() {
+                Ok(json) => {
+                    self.buf = format!("data: {}\n\n", json).into_bytes();
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0), // Receiver dropped; end the stream.
+            }
+        }
+        let remaining = &self.buf[self.pos..];
+        let n = remaining.len().min(buf.len());
+        buf[..n].copy_from_slice(&remaining[..n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
