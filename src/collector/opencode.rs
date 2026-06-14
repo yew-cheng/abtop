@@ -473,6 +473,7 @@ mod tests {
                 ppid: 1,
                 rss_kb: 1000,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "/home/user/.opencode/bin/opencode".to_string(),
             },
         );
@@ -483,6 +484,7 @@ mod tests {
                 ppid: 1,
                 rss_kb: 500,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "grep opencode".to_string(),
             },
         );
@@ -493,6 +495,7 @@ mod tests {
                 ppid: 1,
                 rss_kb: 800,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "node /usr/bin/opencode run test".to_string(),
             },
         );

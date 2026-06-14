@@ -1447,6 +1447,7 @@ mod tests {
             rss_kb: 0,
             cpu_pct: 0.0,
             command: command.to_string(),
+            start_time: 0,
         }
     }
 
@@ -2015,6 +2016,7 @@ mod tests {
                 rss_kb: 1024,
                 cpu_pct: 0.0,
                 command: "codex".to_string(),
+                start_time: 0,
             },
         );
 
@@ -2063,6 +2065,7 @@ mod tests {
                 rss_kb: 1024,
                 cpu_pct: 0.0,
                 command: "codex".to_string(),
+                start_time: 0,
             },
         );
 
@@ -2105,6 +2108,7 @@ mod tests {
                 rss_kb: 1024,
                 cpu_pct: 0.0,
                 command: "codex".to_string(),
+                start_time: 0,
             },
         );
 
@@ -2149,6 +2153,7 @@ mod tests {
                 rss_kb: 1024,
                 cpu_pct: 0.0,
                 command: "codex".to_string(),
+                start_time: 0,
             },
         );
 

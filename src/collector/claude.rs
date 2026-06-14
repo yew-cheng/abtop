@@ -2077,6 +2077,7 @@ mod tests {
                 rss_kb: 2048,
                 cpu_pct: 0.0,
                 command: command.to_string(),
+                start_time: 0,
             },
         );
         process_info
@@ -2629,6 +2630,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 1,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "abtop".to_string(),
             },
         );
@@ -2639,6 +2641,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 1,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "claude".to_string(),
             },
         );
@@ -2649,6 +2652,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: abtop_pid,
                 rss_kb: 1,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "claude --print summarize".to_string(),
             },
         );
@@ -2659,6 +2663,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 1,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "codex".to_string(),
             },
         );
@@ -2669,6 +2674,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 1,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "claude --print user-script".to_string(),
             },
         );
@@ -3718,6 +3724,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 2048,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "claude".to_string(),
             },
         );
@@ -3789,6 +3796,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 1024,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "abtop".to_string(),
             },
         );
@@ -3799,6 +3807,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: abtop_pid,
                 rss_kb: 512,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "claude --print -".to_string(),
             },
         );
@@ -3866,6 +3875,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 ppid: 1,
                 rss_kb: 1024,
                 cpu_pct: 0.0,
+                start_time: 0,
                 command: "abtop".to_string(),
             },
         );
@@ -3877,6 +3887,7 @@ n/Users/bob/.claude-alt/projects/-Users-bob-project/session.jsonl
                 rss_kb: 512,
                 cpu_pct: 0.5,
                 command: "claude --print user-script".to_string(),
+                start_time: 0,
             },
         );
 

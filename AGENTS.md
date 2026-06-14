@@ -14,6 +14,18 @@ English is mandatory for all project-facing work and communication.
 - When quoting or preserving non-English input, add an English explanation and keep the non-English text as short as possible.
 - If a contributor opens an issue, comment, or review in another language, respond in English and continue the thread in English.
 
+## Agent Code Change Policy
+
+Do not modify source code, tests, build configuration, or project tooling without explicit user approval. This includes, but is not limited to, edits to files under `src/`, `tests/`, `Cargo.toml`, `Cargo.lock`, scripts, and CI workflows.
+
+When a code change is needed:
+
+1. Explain the proposed change, the reasoning, and the expected impact.
+2. Wait for the user to explicitly approve before editing.
+3. Keep the change minimal and focused.
+
+Documentation updates requested by the user (such as updates to this `AGENTS.md` file) are exempt when the user explicitly asks for them.
+
 ## Architecture
 
 ```
@@ -28,6 +40,7 @@ src/
 │   ├── mod.rs              # MultiCollector orchestration, orphan port detection
 │   ├── claude.rs           # Claude Code: session discovery, transcript parsing
 │   ├── codex.rs            # Codex CLI: session discovery via ps+lsof, JSONL parsing
+│   ├── kimi.rs             # Kimi Code: session_index.jsonl + wire.jsonl parsing
 │   ├── opencode.rs         # OpenCode: session discovery via ps + SQLite DB parsing
 │   ├── process.rs          # Child process tree (ps) + open ports (lsof) + git stats
 │   └── rate_limit.rs       # Rate limit file reading (~/.claude/abtop-rate-limits.json)
@@ -58,6 +71,7 @@ src/
 ┌─ ⁵sessions ─────────────────────────────────────────────────────────┐
 │ ►*CC 7336 abtop  ● Work opus  82% 1.2M  48  Edit src/pay.rs       │
 │  >CD 8840 pred   ◌ Wait sonn  91% 340k  12  waiting                │
+│  ◆KM 9200 api-srv ◉ Think kimi  35% 180k   9  Write src/main.rs    │
 │ ─────────────────────────────────────────────────────────────────── │
 │  SESSION 7336 · /Users/graykode/abtop                               │
 │  Stripe payment integration...                                      │
@@ -167,11 +181,32 @@ Rate limits extracted from `token_count` events:
 }
 ```
 
-### 4. OpenCode sessions: `~/.local/share/opencode/opencode.db`
+### 3. OpenCode sessions: `~/.local/share/opencode/opencode.db`
 - Discover running `opencode` processes via shared `ps` data.
 - Read recent sessions from OpenCode's SQLite DB through `sqlite3 -readonly -json`.
 - Match live PIDs to DB sessions by process cwd. OpenCode does not expose a PID/session mapping, so when multiple DB rows share one cwd, only live PIDs should be assigned and older rows should not be shown as live duplicates.
 - OpenCode contributes session/token/project/port data, but not quota data. Quota remains Claude + Codex only.
+
+### 4. Kimi Code sessions: `~/.kimi-code/`
+
+Kimi Code (v0.14.3+, protocol v1.4) uses a session index plus per-session `wire.jsonl` transcripts.
+
+Discovery strategy:
+1. Read `{KIMI_CODE_HOME:-~/.kimi-code}/session_index.jsonl` (slow tick).
+2. Find running `kimi` processes via shared `ps` data.
+3. Match live PIDs to sessions by process cwd == `workDir` from the index.
+4. Read `{sessionDir}/state.json` for metadata (`createdAt`, `title`, `lastPrompt`).
+5. Incrementally parse `{sessionDir}/agents/main/wire.jsonl` (falls back to `{sessionDir}/wire.jsonl`).
+
+Key wire events:
+- `config.update` — model alias (`modelAlias`) and thinking level (`thinkingLevel`).
+- `turn.prompt` — user prompt.
+- `step.end` — token usage (`inputOther`, `output`, `inputCacheRead`, `inputCacheCreation`) and `finishReason`.
+- `tool.call` / `tool.result` — current task and pending-tool detection.
+- `usage.record` with `usageScope: "session"` — cumulative reconciliation (per-turn scope ignored to avoid double counting).
+- `context.apply_compaction` — compaction counter.
+
+Context window: 256,000 tokens for `kimi-for-coding` / `kimi-k2`; 200,000 fallback. Kimi does not expose account-level rate limits, so quota panel remains Claude + Codex only.
 
 ### 5. Subagents: `~/.claude/projects/{path}/{sessionId}/subagents/`
 - `agent-{hash}.jsonl` — same JSONL format as main transcript
@@ -229,7 +264,7 @@ File format read by abtop:
 
 **Done detection**: session files are deleted on normal exit, but may linger briefly or survive crashes. When PID is dead but file exists, show as Done and clean up on next tick.
 
-**PID reuse risk**: verify PID is still the expected agent process (Claude, Codex, or OpenCode) by checking `ps -p {pid} -o command=`. Don't trust PID alone.
+**PID reuse risk**: verify PID is still the expected agent process (Claude, Codex, OpenCode, or Kimi) by checking `ps -p {pid} -o command=`. Don't trust PID alone.
 
 Current task (2nd line under each session):
 - Working → last `tool_use` name + first arg (e.g. `Edit src/main.rs`)

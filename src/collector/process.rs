@@ -10,6 +10,8 @@ pub struct ProcInfo {
     pub rss_kb: u64,
     pub cpu_pct: f64,
     pub command: String,
+    /// Process start time as milliseconds since the Unix epoch.
+    pub start_time: u64,
 }
 
 /// Resolve all symlinks in /proc/{pid}/fd, returning their targets.
@@ -38,6 +40,16 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
         .ok()
         .and_then(|s| s.split_whitespace().next()?.parse().ok())
         .unwrap_or(0.0);
+
+    let btime_secs: u64 = fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("btime "))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(0);
 
     let entries = match fs::read_dir("/proc") {
         Ok(e) => e,
@@ -73,6 +85,7 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
         let rss_pages: u64 = fields[21].parse().unwrap_or(0);
 
         let rss_kb = rss_pages * page_size / 1024;
+        let start_time = ((btime_secs as f64 + starttime as f64 / clk_tck) * 1000.0) as u64;
 
         // CPU%: lifetime average (total CPU time / wall time).
         // This differs from ps's instantaneous %CPU but is sufficient for
@@ -105,6 +118,7 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
                 rss_kb,
                 cpu_pct,
                 command,
+                start_time,
             },
         );
     }
@@ -154,6 +168,11 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
         if command.is_empty() {
             continue;
         }
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let start_time = (now_secs.saturating_sub(proc_.run_time())) * 1000;
         map.insert(
             pid_u32,
             ProcInfo {
@@ -162,6 +181,7 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
                 rss_kb: proc_.memory() / 1024,
                 cpu_pct: proc_.cpu_usage() as f64,
                 command,
+                start_time,
             },
         );
     }
@@ -170,9 +190,11 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 pub fn get_process_info() -> HashMap<u32, ProcInfo> {
+    use chrono::{Local, NaiveDateTime};
+
     let mut map = HashMap::new();
     let output = Command::new("ps")
-        .args(["-ww", "-eo", "pid,ppid,rss,%cpu,command"])
+        .args(["-ww", "-eo", "pid,ppid,rss,%cpu,lstart,command"])
         .output()
         .ok();
 
@@ -180,14 +202,21 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 {
+            if parts.len() >= 9 {
                 if let (Ok(pid), Ok(ppid), Ok(rss)) = (
                     parts[0].parse::<u32>(),
                     parts[1].parse::<u32>(),
                     parts[2].parse::<u64>(),
                 ) {
                     let cpu = parts[3].parse::<f64>().unwrap_or(0.0);
-                    let command = parts[4..].join(" ");
+                    // lstart = parts[4..9] joined (e.g. "Mon Jun 14 09:02:55 2026")
+                    let lstart = parts[4..9].join(" ");
+                    let start_time = NaiveDateTime::parse_from_str(&lstart, "%a %b %e %H:%M:%S %Y")
+                        .ok()
+                        .and_then(|naive| Local.from_local_datetime(&naive).single())
+                        .map(|dt| dt.timestamp_millis().max(0) as u64)
+                        .unwrap_or(0);
+                    let command = parts[9..].join(" ");
                     map.insert(
                         pid,
                         ProcInfo {
@@ -196,6 +225,7 @@ pub fn get_process_info() -> HashMap<u32, ProcInfo> {
                             rss_kb: rss,
                             cpu_pct: cpu,
                             command,
+                            start_time,
                         },
                     );
                 }
@@ -602,6 +632,7 @@ mod tests {
             rss_kb: 0,
             cpu_pct: 0.0,
             command: "x".to_string(),
+            start_time: 0,
         }
     }
 

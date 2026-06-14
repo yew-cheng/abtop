@@ -1093,6 +1093,7 @@ fn is_supported_agent_command(cmd: &str) -> bool {
     crate::collector::process::cmd_has_binary(cmd, "claude")
         || crate::collector::process::cmd_has_binary(cmd, "codex")
         || crate::collector::process::cmd_has_binary(cmd, "opencode")
+        || crate::collector::process::cmd_has_binary(cmd, "kimi")
 }
 
 fn is_killable_agent_command(cmd: &str) -> bool {
@@ -1190,6 +1191,7 @@ mod tests {
         assert!(is_supported_agent_command("/usr/local/bin/claude"));
         assert!(is_supported_agent_command("codex --resume abc"));
         assert!(is_supported_agent_command("/opt/homebrew/bin/opencode"));
+        assert!(is_supported_agent_command("/home/user/.kimi-code/bin/kimi"));
         assert!(!is_supported_agent_command("node server.js"));
     }
 

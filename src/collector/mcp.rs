@@ -396,6 +396,7 @@ mod tests {
             rss_kb: 0,
             cpu_pct: 0.0,
             command: command.to_string(),
+            start_time: 0,
         }
     }
 

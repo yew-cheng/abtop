@@ -10,6 +10,17 @@ use ratatui::Frame;
 
 use super::{btop_block_active, fmt_mem_kb, fmt_tokens, grad_at, make_gradient, truncate_str};
 
+/// Strip the common `session_` prefix (used by Kimi Code) and return the
+/// first 8 characters of the session id for compact display.
+fn short_session_id(session_id: &str) -> &str {
+    let id = session_id.strip_prefix("session_").unwrap_or(session_id);
+    if id.len() >= 8 {
+        &id[..8]
+    } else {
+        id
+    }
+}
+
 pub(crate) fn draw_sessions_panel(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_sessions_panel_active(f, app, area, theme, false);
 }
@@ -137,6 +148,7 @@ pub(crate) fn draw_sessions_panel_active(
             "claude"   => ("*CC", Color::Rgb(217, 119, 87)),  // #D97757 terracotta
             "codex"    => (">CD", Color::Rgb(122, 157, 255)), // #7A9DFF periwinkle
             "opencode" => ("#OC", Color::Rgb(74, 222, 128)),  // #4ADE80 emerald
+            "kimi"     => ("◆KM", Color::Rgb(100, 180, 255)), // Moonshot AI brand blue
             other => {
                 let fallback: String = other.chars().take(3).collect::<String>().to_uppercase();
                 (
@@ -171,11 +183,7 @@ pub(crate) fn draw_sessions_panel_active(
             Style::default()
         };
 
-        let sid_short = if session.session_id.len() >= 8 {
-            &session.session_id[..8]
-        } else {
-            &session.session_id
-        };
+        let sid_short = short_session_id(&session.session_id);
 
         let summary_col = app.session_summary(session);
 
@@ -584,11 +592,7 @@ pub(crate) fn draw_sessions_panel_active(
         // SESSION header — always rendered
         {
             let mut lines = Vec::new();
-            let sid_short = if session.session_id.len() >= 8 {
-                &session.session_id[..8]
-            } else {
-                &session.session_id
-            };
+            let sid_short = short_session_id(&session.session_id);
             let session_ref = if header_area.width <= 80 {
                 format!("►{} · {}", sid_short, session.project_name)
             } else {
