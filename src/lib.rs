@@ -89,29 +89,27 @@ fn build_app(theme: theme::Theme, cfg: &config::AppConfig) -> App {
 }
 
 pub fn run() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-
     // --version / -V flag: print version and exit
-    if args.iter().any(|a| a == "--version" || a == "-V") {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("abtop {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
     // --update flag: self-update via GitHub releases installer
-    if args.iter().any(|a| a == "--update") {
+    if std::env::args().any(|a| a == "--update") {
         return run_update();
     }
 
     // --setup flag: configure StatusLine hook and exit
-    if args.iter().any(|a| a == "--setup") {
+    if std::env::args().any(|a| a == "--setup") {
         setup::run_setup();
         return Ok(());
     }
 
     // --http flag: run headless HTTP server and exit.
-    if let Some(pos) = args.iter().position(|a| a == "--http") {
-        let port = args
-            .get(pos + 1)
+    if let Some(pos) = std::env::args().position(|a| a == "--http") {
+        let port = std::env::args()
+            .nth(pos + 1)
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(8787);
         return server::run_http(&format!("0.0.0.0:{}", port));
@@ -121,11 +119,10 @@ pub fn run() -> io::Result<()> {
     let cfg = config::load_config();
 
     // --theme flag > config file > default
-    let initial_theme = args
-        .iter()
+    let initial_theme = std::env::args()
         .position(|a| a == "--theme")
         .map(|pos| {
-            let val = args.get(pos + 1).cloned();
+            let val = std::env::args().nth(pos + 1);
             match val {
                 Some(name) if !name.starts_with('-') => name,
                 Some(name) => {
@@ -152,14 +149,14 @@ pub fn run() -> io::Result<()> {
         })
         .or_else(|| theme::Theme::by_name(&cfg.theme));
 
-    let demo_mode = args.iter().any(|a| a == "--demo");
-    let exit_on_jump = args.iter().any(|a| a == "--exit-on-jump");
+    let demo_mode = std::env::args().any(|a| a == "--demo");
+    let exit_on_jump = std::env::args().any(|a| a == "--exit-on-jump");
 
     // --json flag: print a machine-readable JSON snapshot and exit.
     // Single tick, no summary subprocesses. Useful for scripting and as a
     // manual check of the web snapshot API; the web tool uses the library
     // `App::to_snapshot` directly rather than shelling out to this.
-    if args.iter().any(|a| a == "--json") {
+    if std::env::args().any(|a| a == "--json") {
         let mut app = build_app(initial_theme.unwrap_or_default(), &cfg);
         if demo_mode {
             demo::populate_demo(&mut app);
@@ -179,7 +176,7 @@ pub fn run() -> io::Result<()> {
     }
 
     // --once flag: print snapshot and exit
-    if args.iter().any(|a| a == "--once") {
+    if std::env::args().any(|a| a == "--once") {
         let mut app = build_app(initial_theme.unwrap_or_default(), &cfg);
         if demo_mode {
             demo::populate_demo(&mut app);
@@ -197,19 +194,6 @@ pub fn run() -> io::Result<()> {
         }
         print_snapshot(&app);
         return Ok(());
-    }
-
-    // TUI mode is opt-in. Anything that clearly belongs to the terminal UI
-    // (explicit --tui, theme selection, demo, or jump-on-enter) switches to it.
-    let tui_mode = args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--tui" | "--theme" | "--demo" | "--exit-on-jump"
-        )
-    });
-
-    if !tui_mode {
-        return server::run_http("0.0.0.0:8787");
     }
 
     // Setup terminal
