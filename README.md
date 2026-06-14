@@ -47,13 +47,13 @@ Pre-built binaries for all platforms are available on the [GitHub Releases](http
 ## Usage
 
 ```bash
-abtop                    # Launch TUI + background HTTP server (port 8787)
-abtop --tui              # Launch TUI only
+abtop                    # Run headless HTTP server (default port 8787)
+abtop --tui              # Launch terminal UI
 abtop --once             # Print snapshot and exit
 abtop --json             # Print one JSON snapshot and exit (for scripts/tools)
 abtop --setup            # Install rate limit collection hook
 abtop --theme dracula    # Launch TUI with a specific theme
-abtop --http 8080        # Run headless HTTP server on a custom port
+abtop --http 8080        # Run HTTP server on a custom port
 ```
 
 Recommended terminal size: **120x40** or larger. Minimum 80x24 — panels hide gracefully when small.
@@ -190,8 +190,7 @@ is a reference consumer: a local-first web dashboard built on exactly this API.
 
 ### HTTP server
 
-By default the TUI also starts a background HTTP server on port 8787. To run
-headlessly without the TUI:
+Run abtop headlessly and expose the snapshot over HTTP:
 
 ```bash
 abtop --http         # default port 8787
